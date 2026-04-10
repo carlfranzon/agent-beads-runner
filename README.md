@@ -91,6 +91,9 @@ abr --review --pr 5
 
 # Preview what would happen
 abr --dry-run
+
+# Install abr skill for your AI agents
+abr --install-skill
 ```
 
 ## Options
@@ -107,6 +110,7 @@ abr --dry-run
 | `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `codex` |
 | `--model <name>` | Model short name (see below) |
 | `--new-tmux` | Create a separate tmux session |
+| `--install-skill` | Install abr skill to AI agent platforms (interactive) |
 | `--dry-run` | Show what would happen without executing |
 | `--version`, `-V` | Show version |
 | `-h`, `--help` | Show help |

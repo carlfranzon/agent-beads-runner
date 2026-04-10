@@ -9,6 +9,7 @@
 - `bin/abr` — The entire tool. Single bash script, no build step.
 - `Formula/abr.rb` — Homebrew formula (lives in the `carlfranzon/homebrew-tap` repo, mirrored here for reference).
 - `.github/workflows/release.yml` — CI: auto-tags on version bump, creates GitHub Release, updates Homebrew tap.
+- `.github/skills/abr/SKILL.md` — Canonical skill file (symlinked from `.agents/` and `.claude/`, embedded in `--install-skill`).
 
 ## Build & Test
 
@@ -36,6 +37,7 @@ echo "$MODEL_RESOLVED $EFFORT_RESOLVED"
 - **Agent backends**: Each agent (copilot, claude, gemini, codex) has its own case block in `resolve_model_and_effort()` AND in the agent launch sections (`run_one_bead`, `review_one_pr`). Changes to one must be mirrored to the other.
 - **Locking**: All `bd` commands that may write go through `bd_locked()` (mkdir-based mutex). Never call `bd` directly for write operations.
 - **Commit messages**: Use conventional commits — `fix:`, `feat:`, `ci:`, `docs:`.
+- **Documentation sync**: When adding or changing features, always update ALL of these in the same commit: `--help` text in `bin/abr`, `README.md`, `AGENTS.md`, and `.github/skills/abr/SKILL.md` (which is the canonical source for the embedded SKILL in `--install-skill` and the symlinked copies in `.agents/` and `.claude/`).
 
 ## Release Process
 
