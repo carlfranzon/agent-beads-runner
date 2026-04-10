@@ -1,0 +1,1506 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# abr — Agent Beads Runner
+# Portable parallel AI agent launcher using git worktrees + beads
+#
+# Run from any beads-enabled git repo. Modes compose:
+# --loop keeps respawning, --parallel-N adds tmux panes.
+# Each bead always gets a completely fresh agent session.
+#
+# Usage:
+#   abr                                  # One agent, one bead, exits
+#   abr --loop                           # Keeps picking beads sequentially until none left
+#   abr --loop-5                         # Loop through at most 5 beads, then stop
+#   abr --parallel-3                     # 3 agents in tmux, each works one bead
+#   abr --loop --parallel-3              # 3 tmux panes, each loops until no beads left
+#   abr --review                         # Review all open agent PRs
+#   abr --review --pr 5                  # Review a specific PR
+#   abr --review --parallel-3            # Review PRs in 3 parallel tmux panes
+#   abr --bead <id>                      # Work a specific bead
+#   abr --agent gemini                   # Use Gemini CLI (default: copilot)
+#   abr --agent copilot --model opus46-h # Use Copilot with Opus 4.6, high effort
+#   abr --dry-run                        # Show what would happen
+#
+
+ABR_VERSION="0.1.0"
+
+# --- Configuration -----------------------------------------------------------
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "Error: Not inside a git repository." >&2; exit 1
+}
+REPO_NAME="$(basename "$REPO_ROOT")"
+WORKTREE_BASE="${REPO_ROOT}-worktrees"
+COPILOT_CLI="${COPILOT_CLI:-copilot}"
+PARALLEL=0        # 0 = no tmux; N = number of tmux panes
+LOOP_MODE=false
+LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
+REVIEW_MODE=false
+DRY_RUN=false
+NEW_TMUX=false
+TARGET_BEAD=""
+TARGET_PR=""      # PR number for --review --pr <N>
+AGENT_TOOL="${AGENT_TOOL:-copilot}"  # copilot | claude | gemini | codex
+MODEL=""            # Model short name (e.g. sonnet46-h); empty = agent default
+TMUX_SESSION="${TMUX_SESSION:-abr-${REPO_NAME}}"
+
+# --- Parse arguments ----------------------------------------------------------
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --loop)         LOOP_MODE=true; shift ;;
+        --loop-[0-9]*)
+            LOOP_MODE=true
+            LOOP_MAX="${1#--loop-}"
+            if [[ "$LOOP_MAX" -lt 1 ]]; then
+                echo "Loop count must be >= 1" >&2; exit 1
+            fi
+            shift ;;
+        --review)       REVIEW_MODE=true; shift ;;
+        --dry-run)      DRY_RUN=true; shift ;;
+        --new-tmux)     NEW_TMUX=true; shift ;;
+        --bead)         TARGET_BEAD="$2"; shift 2 ;;
+        --pr)           TARGET_PR="$2"; shift 2 ;;
+        --agent)        AGENT_TOOL="$2"; shift 2 ;;
+        --model)        MODEL="$2"; shift 2 ;;
+        --parallel-[0-9]*)
+            PARALLEL="${1#--parallel-}"
+            if [[ "$PARALLEL" -lt 1 ]]; then
+                echo "Parallel count must be >= 1" >&2; exit 1
+            fi
+            shift ;;
+        --parallel)
+            PARALLEL=3; shift ;;
+        --version|-V)
+            echo "abr $ABR_VERSION"; exit 0 ;;
+        -h|--help)
+            cat <<'HELP'
+abr — Agent Beads Runner
+Portable parallel AI agent launcher using git worktrees + beads
+
+Usage:
+  abr                                    One agent, one bead, exits
+  abr --loop                             Keeps picking beads sequentially until none left
+  abr --loop-5                           Loop through at most 5 beads, then stop
+  abr --parallel-3                       3 agents in tmux panes, each works one bead
+  abr --loop --parallel-3                3 tmux panes, each keeps looping until no beads left
+  abr --bead <id>                        Work a specific bead
+  abr --review                           Review all open agent PRs
+  abr --review --pr 5                    Review a specific PR
+  abr --review --parallel-3              Review PRs in 3 parallel tmux panes
+  abr --agent gemini                     Use Gemini CLI
+  abr --agent copilot --model opus46-h   Use Copilot with Opus 4.6, high effort
+  abr --dry-run                          Preview without executing
+
+Graceful stop (loop mode):
+  Press Ctrl+C once during a loop to finish the current bead and stop.
+  Or: touch $REPO_ROOT/.agent-stop   (from another terminal)
+  Or: kill -USR1 <pid>               (sends stop signal to the loop)
+
+Options:
+  --loop                Keep respawning agents until no ready beads remain
+  --loop-N              Loop through at most N beads then stop (e.g. --loop-5)
+  --parallel-N          Run N agents in tmux panes (e.g. --parallel-5)
+  --parallel            Shorthand for --parallel-3
+  --bead <id>           Work on a specific bead instead of auto-picking
+  --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
+  --pr <number>         With --review: review a specific PR number
+  --agent <tool>        AI tool: copilot (default), claude, gemini, codex
+  --model <name>        Model short name (see table below). Default: per-agent
+  --new-tmux            Create a separate tmux session (default: add panes to existing)
+  --dry-run             Show what would happen without executing
+  --version, -V         Show version
+  -h, --help            Show this help
+
+Modes compose:
+  (default)             One agent → one bead → exit
+  --loop / --loop-N     Fresh session per bead → pick next → repeat → exit when none left (or after N)
+  --parallel-N          N tmux panes → each works one bead → all exit
+  --loop --parallel-N   N tmux panes → each loops (fresh session per bead) → exit when none left
+  --review              Review agent PRs → run quality gates → AI verdict → merge or reject
+
+tmux behavior:
+  If a tmux session already exists for this repo, new --parallel panes are added
+  to it. Use --new-tmux to create a separate session (e.g. for a different agent).
+
+Models (--model <name>):
+  Use short names from the table, or pass a full model name directly.
+  Unrecognized short names are passed through as-is to the agent CLI.
+
+  Effort/reasoning suffixes:
+    Append -l (low), -m (medium), -h (high), or -xh (extra-high) to any
+    short name to set reasoning effort.  Example: --model sonnet46-h
+    Copilot: passed via --effort flag. Codex: passed via -c model_reasoning_effort.
+    Claude and Gemini: suffix is parsed but has no effect (no CLI flag).
+
+  Copilot (--agent copilot)              default: sonnet46-h
+    Effort: --effort flag works with ALL models (low/medium/high/xhigh)
+    Short Name     Model                    Reasoning
+    ─────────────  ─────────────────────    ─────────
+    sonnet46       claude-sonnet-4.6        extended thinking
+    sonnet45       claude-sonnet-4.5        extended thinking
+    sonnet4        claude-sonnet-4          no
+    opus46         claude-opus-4.6          extended thinking
+    opus45         claude-opus-4.5          extended thinking
+    haiku          claude-haiku-4.5         no
+    gpt41          gpt-4.1                  no
+    gpt5m          gpt-5-mini              effort (l/m/h/xh)
+    gpt52          gpt-5.2                  effort (l/m/h/xh)
+    gpt52c         gpt-5.2-codex            effort (l/m/h/xh)
+    gpt53c         gpt-5.3-codex            effort (l/m/h/xh)
+    gpt54          gpt-5.4                  effort (l/m/h/xh)
+    gpt54m         gpt-5.4-mini             effort (l/m/h/xh)
+    gem25p         gemini-2.5-pro           thinking
+    gem3f          gemini-3-flash           no
+    gem31p         gemini-3.1-pro           no
+    grok           grok-code-fast-1         no
+    raptor         raptor-mini              no
+    goldeneye      goldeneye                no
+
+  Claude (--agent claude)                default: sonnet46
+    Effort: no CLI flag. Opus 4.6 and Sonnet 4.6 support effort via settings.
+    Short Name     Model                    Reasoning
+    ─────────────  ─────────────────────    ─────────
+    sonnet46       claude-sonnet-4-6        extended thinking
+    sonnet45       claude-sonnet-4-5        extended thinking
+    sonnet4        claude-sonnet-4-0        no
+    opus46         claude-opus-4-6          extended thinking
+    opus45         claude-opus-4-5          extended thinking
+    haiku          claude-haiku-4-5         no
+
+  Gemini (--agent gemini)                default: 25-pro
+    Effort: no CLI flag. 2.5 Pro and 2.5 Flash have configurable thinking.
+    Short Name     Model                    Reasoning
+    ─────────────  ─────────────────────    ─────────
+    25-pro         gemini-2.5-pro           thinking
+    25-flash       gemini-2.5-flash         thinking
+    2-flash        gemini-2.0-flash         no
+    3-flash        gemini-3-flash           no
+    31-pro         gemini-3.1-pro           no
+
+  Codex (--agent codex)                  default: gpt54
+    Effort: supported via -c model_reasoning_effort (low/medium/high).
+    Short Name     Model                    Reasoning
+    ─────────────  ─────────────────────    ─────────
+    gpt54          gpt-5.4                  effort (l/m/h/xh)
+    gpt54m         gpt-5.4-mini             effort (l/m/h/xh)
+    gpt53c         gpt-5.3-codex            effort (l/m/h/xh)
+    gpt53cs        gpt-5.3-codex-spark      effort (l/m/h/xh)
+    gpt52          gpt-5.2                  effort (l/m/h/xh)
+    gpt41          gpt-4.1                  no
+    gpt41m         gpt-4.1-mini             no
+    gpt41n         gpt-4.1-nano             no
+    o4m            o4-mini                  native reasoning
+    o3m            o3-mini                  native reasoning
+HELP
+            exit 0 ;;
+        *)
+            echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# --- Helpers ------------------------------------------------------------------
+
+log()  { echo "[abr] $(date +%H:%M:%S) $*"; }
+logr() { echo "[abr] $(date +%H:%M:%S) $*" >&2; }
+
+# --- Serialize bd access (embedded Dolt supports only one writer) -------------
+#
+# Uses mkdir-based mutex (atomic on POSIX, works on macOS without flock).
+# All script-level bd calls that may write go through bd_locked() so parallel
+# agents queue instead of crashing with "another process holds the exclusive lock".
+
+BD_LOCKDIR="${REPO_ROOT}/.beads/.bd.lock"
+BD_LOCK_TIMEOUT=90  # seconds
+
+bd_locked() {
+    local waited=0
+    while ! mkdir "$BD_LOCKDIR" 2>/dev/null; do
+        # Detect stale lock (owning process is gone)
+        if [[ -f "$BD_LOCKDIR/pid" ]]; then
+            local lock_pid
+            lock_pid=$(cat "$BD_LOCKDIR/pid" 2>/dev/null || echo "")
+            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                log "Breaking stale bd lock (pid $lock_pid is gone)"
+                rm -rf "$BD_LOCKDIR"
+                continue
+            fi
+        fi
+        if [[ $waited -ge $BD_LOCK_TIMEOUT ]]; then
+            log "bd lock timed out after ${BD_LOCK_TIMEOUT}s — breaking lock"
+            rm -rf "$BD_LOCKDIR"
+            continue
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Record holder for stale detection
+    echo $$ > "$BD_LOCKDIR/pid" 2>/dev/null || true
+
+    bd "$@"
+    local rc=$?
+
+    rm -rf "$BD_LOCKDIR"
+    return $rc
+}
+
+# --- Graceful stop support ----------------------------------------------------
+
+STOP_REQUESTED=false
+STOP_FILE="${REPO_ROOT}/.agent-stop"
+
+request_stop() {
+    STOP_REQUESTED=true
+    log "Stop requested — will finish current bead and exit."
+}
+
+# SIGUSR1: explicit stop signal (kill -USR1 <pid>)
+trap 'request_stop' USR1
+# SIGINT (Ctrl+C): first press requests graceful stop; second press exits immediately
+trap 'if [[ "$STOP_REQUESTED" == "true" ]]; then log "Force quit."; exit 130; else request_stop; fi' INT
+
+should_stop() {
+    # Check the flag (set by signal handlers)
+    [[ "$STOP_REQUESTED" == "true" ]] && return 0
+    # Check the stop file (created by another terminal)
+    if [[ -f "$STOP_FILE" ]]; then
+        rm -f "$STOP_FILE"
+        request_stop
+        return 0
+    fi
+    return 1
+}
+
+pick_next_bead() {
+    cd "$REPO_ROOT"
+    bd_locked ready --json 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    issues = data if isinstance(data, list) else data.get('issues', [])
+    issues.sort(key=lambda x: (-len(x.get('id', '')), x.get('priority', 2)))
+    if issues:
+        print(issues[0]['id'])
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || echo ""
+}
+
+pick_n_beads() {
+    local n="$1"
+    cd "$REPO_ROOT"
+    bd_locked ready --json 2>/dev/null \
+        | python3 -c "
+import sys, json
+n = int(sys.argv[1])
+try:
+    data = json.load(sys.stdin)
+    issues = data if isinstance(data, list) else data.get('issues', [])
+    issues.sort(key=lambda x: (-len(x.get('id', '')), x.get('priority', 2)))
+    for issue in issues[:n]:
+        print(issue['id'])
+except Exception:
+    sys.exit(1)
+" "$n" 2>/dev/null || echo ""
+}
+
+sanitize_branch() {
+    echo "agent/$1" | tr '.' '-'
+}
+
+claim_bead() {
+    local bead_id="$1"
+    local max_attempts="${2:-3}"
+    local attempt
+
+    cd "$REPO_ROOT"
+    for attempt in $(seq 1 "$max_attempts"); do
+        if bd_locked update "$bead_id" --claim 2>/dev/null; then
+            # Push claim to remote so parallel agents see it
+            bd_locked dolt push 2>/dev/null || true
+            return 0
+        fi
+        [[ $attempt -lt $max_attempts ]] && sleep $(( (RANDOM % 3) + 1 ))
+    done
+    return 1
+}
+
+# --- Package manager detection ------------------------------------------------
+
+detect_pkg_manager() {
+    if [[ -f "${REPO_ROOT}/bun.lockb" ]] || [[ -f "${REPO_ROOT}/bun.lock" ]]; then
+        echo "bun"
+    elif [[ -f "${REPO_ROOT}/pnpm-lock.yaml" ]]; then
+        echo "pnpm"
+    elif [[ -f "${REPO_ROOT}/yarn.lock" ]]; then
+        echo "yarn"
+    elif [[ -f "${REPO_ROOT}/package-lock.json" ]] || [[ -f "${REPO_ROOT}/package.json" ]]; then
+        echo "npm"
+    elif [[ -f "${REPO_ROOT}/Gemfile.lock" ]]; then
+        echo "bundle"
+    elif [[ -f "${REPO_ROOT}/requirements.txt" ]] || [[ -f "${REPO_ROOT}/pyproject.toml" ]]; then
+        echo "pip"
+    elif [[ -f "${REPO_ROOT}/go.mod" ]]; then
+        echo "go"
+    elif [[ -f "${REPO_ROOT}/Cargo.toml" ]]; then
+        echo "cargo"
+    else
+        echo ""
+    fi
+}
+
+install_deps() {
+    local wt_path="$1"
+    local pkg_mgr
+    pkg_mgr=$(detect_pkg_manager)
+
+    if [[ -z "$pkg_mgr" ]]; then
+        log "No recognized package manager — skipping dependency install."
+        return 0
+    fi
+
+    log "Installing dependencies ($pkg_mgr)..."
+    case "$pkg_mgr" in
+        npm)    (cd "$wt_path" && npm install --silent 2>&1 | tail -3) ;;
+        pnpm)   (cd "$wt_path" && pnpm install --silent 2>&1 | tail -3) ;;
+        yarn)   (cd "$wt_path" && yarn install --silent 2>&1 | tail -3) ;;
+        bun)    (cd "$wt_path" && bun install 2>&1 | tail -3) ;;
+        bundle) (cd "$wt_path" && bundle install --quiet 2>&1 | tail -3) ;;
+        pip)
+            if [[ -f "${wt_path}/pyproject.toml" ]]; then
+                (cd "$wt_path" && pip install -e . --quiet 2>&1 | tail -3)
+            elif [[ -f "${wt_path}/requirements.txt" ]]; then
+                (cd "$wt_path" && pip install -r requirements.txt --quiet 2>&1 | tail -3)
+            fi
+            ;;
+        go)     (cd "$wt_path" && go mod download 2>&1 | tail -3) ;;
+        cargo)  (cd "$wt_path" && cargo fetch --quiet 2>&1 | tail -3) ;;
+    esac
+}
+
+# --- Env file copying ---------------------------------------------------------
+
+copy_env_files() {
+    local wt_path="$1"
+    local copied=0
+
+    for envfile in "${REPO_ROOT}"/.env*; do
+        [[ -f "$envfile" ]] || continue
+        local basename
+        basename="$(basename "$envfile")"
+        case "$basename" in
+            *.example|*.sample) continue ;;
+        esac
+        cp -f "$envfile" "${wt_path}/${basename}"
+        copied=$((copied + 1))
+    done
+
+    for cfg in .dev.vars .secrets .npmrc.local; do
+        if [[ -f "${REPO_ROOT}/${cfg}" ]]; then
+            cp -f "${REPO_ROOT}/${cfg}" "${wt_path}/${cfg}"
+            copied=$((copied + 1))
+        fi
+    done
+
+    [[ $copied -gt 0 ]] && log "Copied $copied env/config file(s) to worktree."
+}
+
+# --- Quality gate detection ---------------------------------------------------
+
+detect_quality_commands() {
+    local cmds=""
+    local pkg_mgr
+    pkg_mgr=$(detect_pkg_manager)
+
+    case "$pkg_mgr" in
+        npm|pnpm|yarn|bun)
+            if [[ -f "${REPO_ROOT}/package.json" ]]; then
+                local scripts
+                scripts=$(python3 -c "
+import json, sys
+try:
+    pkg = json.load(open('${REPO_ROOT}/package.json'))
+    for s in pkg.get('scripts', {}):
+        print(s)
+except: pass
+" 2>/dev/null || true)
+                local run="${pkg_mgr} run"
+                [[ "$pkg_mgr" == "npm" ]] && run="npm run"
+                echo "$scripts" | grep -q "^lint$" && cmds+="   - \`${run} lint\`\n"
+                echo "$scripts" | grep -q "^typecheck$" && cmds+="   - \`${run} typecheck\`\n"
+                echo "$scripts" | grep -q "^test$" && cmds+="   - \`${run} test\`\n"
+                echo "$scripts" | grep -q "^build$" && cmds+="   - \`${run} build\`\n"
+                if [[ -f "${REPO_ROOT}/tsconfig.json" ]] && ! echo "$scripts" | grep -q "^typecheck$"; then
+                    cmds+="   - \`npx tsc --noEmit\` (typecheck)\n"
+                fi
+            fi
+            ;;
+        bundle)
+            [[ -f "${REPO_ROOT}/Rakefile" ]] && cmds+="   - \`bundle exec rake\`\n" ;;
+        pip)
+            cmds+="   - Run any linters/tests configured in the project\n" ;;
+        go)
+            cmds+="   - \`go vet ./...\`\n"
+            cmds+="   - \`go test ./...\`\n" ;;
+        cargo)
+            cmds+="   - \`cargo check\`\n"
+            cmds+="   - \`cargo test\`\n" ;;
+    esac
+
+    if [[ -z "$cmds" ]]; then
+        cmds="   - Run any linters, tests, or build checks configured in the project\n"
+    fi
+
+    printf '%b' "$cmds"
+}
+
+# --- Model resolution ---------------------------------------------------------
+#
+# Resolves short model names + effort suffixes into full model names and flags.
+# Sets global: MODEL_RESOLVED (full model name), EFFORT_RESOLVED (effort level)
+
+resolve_model_and_effort() {
+    local agent="$1"
+    local short="$2"
+
+    MODEL_RESOLVED=""
+    EFFORT_RESOLVED=""
+
+    if [[ -z "$short" ]]; then
+        return 0
+    fi
+
+    # Extract effort suffix (only active for copilot --effort flag)
+    local base="$short"
+    case "$short" in
+        *-xh) EFFORT_RESOLVED="xhigh";  base="${short%-xh}" ;;
+        *-h)  EFFORT_RESOLVED="high";   base="${short%-h}" ;;
+        *-m)  EFFORT_RESOLVED="medium"; base="${short%-m}" ;;
+        *-l)  EFFORT_RESOLVED="low";    base="${short%-l}" ;;
+    esac
+
+    # Resolve short name → full model name per agent
+    case "$agent" in
+        copilot)
+            case "$base" in
+                # Claude
+                sonnet4)      MODEL_RESOLVED="claude-sonnet-4" ;;
+                sonnet45)     MODEL_RESOLVED="claude-sonnet-4.5" ;;
+                sonnet46)     MODEL_RESOLVED="claude-sonnet-4.6" ;;
+                opus45)       MODEL_RESOLVED="claude-opus-4.5" ;;
+                opus46)       MODEL_RESOLVED="claude-opus-4.6" ;;
+                haiku)        MODEL_RESOLVED="claude-haiku-4.5" ;;
+                # GPT
+                gpt41)        MODEL_RESOLVED="gpt-4.1" ;;
+                gpt5m)        MODEL_RESOLVED="gpt-5-mini" ;;
+                gpt52)        MODEL_RESOLVED="gpt-5.2" ;;
+                gpt52c)       MODEL_RESOLVED="gpt-5.2-codex" ;;
+                gpt53c)       MODEL_RESOLVED="gpt-5.3-codex" ;;
+                gpt54)        MODEL_RESOLVED="gpt-5.4" ;;
+                gpt54m)       MODEL_RESOLVED="gpt-5.4-mini" ;;
+                # Gemini
+                gem25p)       MODEL_RESOLVED="gemini-2.5-pro" ;;
+                gem3f)        MODEL_RESOLVED="gemini-3-flash" ;;
+                gem31p)       MODEL_RESOLVED="gemini-3.1-pro" ;;
+                # Other
+                grok)         MODEL_RESOLVED="grok-code-fast-1" ;;
+                raptor)       MODEL_RESOLVED="raptor-mini" ;;
+                goldeneye)    MODEL_RESOLVED="goldeneye" ;;
+                *)            MODEL_RESOLVED="$base" ;;  # pass-through
+            esac ;;
+        claude)
+            case "$base" in
+                sonnet4)      MODEL_RESOLVED="claude-sonnet-4-0" ;;
+                sonnet45)     MODEL_RESOLVED="claude-sonnet-4-5" ;;
+                sonnet46)     MODEL_RESOLVED="claude-sonnet-4-6" ;;
+                opus45)       MODEL_RESOLVED="claude-opus-4-5" ;;
+                opus46)       MODEL_RESOLVED="claude-opus-4-6" ;;
+                haiku)        MODEL_RESOLVED="claude-haiku-4-5" ;;
+                *)            MODEL_RESOLVED="$base" ;;
+            esac ;;
+        gemini)
+            case "$base" in
+                25-pro)       MODEL_RESOLVED="gemini-2.5-pro" ;;
+                25-flash)     MODEL_RESOLVED="gemini-2.5-flash" ;;
+                2-flash)      MODEL_RESOLVED="gemini-2.0-flash" ;;
+                3-flash)      MODEL_RESOLVED="gemini-3-flash" ;;
+                31-pro)       MODEL_RESOLVED="gemini-3.1-pro" ;;
+                *)            MODEL_RESOLVED="$base" ;;
+            esac ;;
+        codex)
+            case "$base" in
+                gpt54)        MODEL_RESOLVED="gpt-5.4" ;;
+                gpt54m)       MODEL_RESOLVED="gpt-5.4-mini" ;;
+                gpt53c)       MODEL_RESOLVED="gpt-5.3-codex" ;;
+                gpt53cs)      MODEL_RESOLVED="gpt-5.3-codex-spark" ;;
+                gpt52)        MODEL_RESOLVED="gpt-5.2" ;;
+                gpt41)        MODEL_RESOLVED="gpt-4.1" ;;
+                gpt41m)       MODEL_RESOLVED="gpt-4.1-mini" ;;
+                gpt41n)       MODEL_RESOLVED="gpt-4.1-nano" ;;
+                o4m)          MODEL_RESOLVED="o4-mini" ;;
+                o3m)          MODEL_RESOLVED="o3-mini" ;;
+                *)            MODEL_RESOLVED="$base" ;;  # pass-through
+            esac ;;
+        *)
+            MODEL_RESOLVED="$base" ;;
+    esac
+}
+
+# --- Agent prompt builder -----------------------------------------------------
+
+build_agent_prompt() {
+    local bead_id="$1"
+    local quality_cmds
+    quality_cmds=$(detect_quality_commands)
+
+    cat <<PROMPT
+You are an autonomous AI coding agent working on a single task in an isolated git worktree.
+
+## Your Task
+Work on bead: $bead_id
+
+## Workflow (follow EXACTLY)
+
+1. Run \`bd prime\` to load the full beads workflow context
+2. Run \`bd show $bead_id\` to understand the task details and dependencies
+3. Verify the bead is claimed (already done by the launcher). If not, run \`bd update $bead_id --claim\`
+4. Implement the changes required by the bead
+5. Run quality gates if code was changed:
+${quality_cmds}6. Complete the session close protocol:
+   a. \`git add <changed files>\`
+   b. \`git commit -m "feat($bead_id): <concise description>"\`
+   c. \`bd close $bead_id\`
+   d. \`bd dolt push\`
+   e. \`git push --set-upstream origin \$(git branch --show-current)\`
+   f. \`git status\` — must show "up to date with origin"
+
+## Rules
+- Work ONLY on bead $bead_id — do not touch other beads
+- Do NOT modify files unrelated to this bead
+- If the bead is blocked or unclear, run \`bd update $bead_id --notes="<your concern>"\` and exit
+- If you create follow-up work, use \`bd create\` to file new beads
+- Use non-interactive flags: cp -f, mv -f, rm -f
+- Do NOT use interactive editors (vim, nano, etc.)
+- NEVER skip the git push step — work is not done until pushed
+PROMPT
+}
+
+# --- Cleanup on exit ----------------------------------------------------------
+
+cleanup_worktree() {
+    local wt_path="$1"
+    if [[ -d "$wt_path" ]]; then
+        log "Cleaning up worktree: $wt_path"
+        cd "$REPO_ROOT"
+        bd_locked worktree remove "$wt_path" --force 2>/dev/null || \
+            git worktree remove "$wt_path" --force 2>/dev/null || true
+        git worktree prune 2>/dev/null || true
+    fi
+}
+
+# --- Run one bead (worktree → agent → PR → cleanup) --------------------------
+
+run_one_bead() {
+    local bead_id="$1"
+    local branch wt_path
+
+    branch=$(sanitize_branch "$bead_id")
+    wt_path="${WORKTREE_BASE}/${branch}"
+
+    log "=== Starting agent for bead: $bead_id ==="
+    log "Branch: $branch | Worktree: $wt_path"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY RUN] Would create worktree and launch $AGENT_TOOL for $bead_id"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$wt_path")"
+
+    cd "$REPO_ROOT"
+    log "Creating worktree..."
+    bd_locked worktree create "$wt_path" --branch "$branch" 2>&1 | while read -r line; do
+        log "  $line"
+    done
+
+    copy_env_files "$wt_path"
+    install_deps "$wt_path"
+
+    trap "cleanup_worktree '$wt_path'" EXIT
+
+    local prompt
+    prompt=$(build_agent_prompt "$bead_id")
+
+    log "Launching $AGENT_TOOL agent..."
+
+    # Resolve model and effort from --model flag
+    resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
+
+    case "$AGENT_TOOL" in
+        copilot)
+            local cp_model="${MODEL_RESOLVED:-claude-sonnet-4.6}"
+            local cp_effort="${EFFORT_RESOLVED:-high}"
+            (cd "$wt_path" && "$COPILOT_CLI" \
+                --prompt "$prompt" \
+                --model "$cp_model" \
+                --effort "$cp_effort" \
+                --allow-all \
+                --autopilot)
+            ;;
+        claude)
+            local cl_args=(--prompt "$prompt" --allowedTools "Bash,Read,Write,Grep,Glob" --yes)
+            [[ -n "$MODEL_RESOLVED" ]] && cl_args+=(--model "$MODEL_RESOLVED")
+            (cd "$wt_path" && claude "${cl_args[@]}")
+            ;;
+        gemini)
+            local gm_args=(--prompt "$prompt" --yolo)
+            [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
+            (cd "$wt_path" && gemini "${gm_args[@]}")
+            ;;
+        codex)
+            local cx_args=(exec --full-auto)
+            [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
+            [[ -n "$EFFORT_RESOLVED" ]] && cx_args+=(-c "model_reasoning_effort=\"$EFFORT_RESOLVED\"")
+            cx_args+=("$prompt")
+            (cd "$wt_path" && codex "${cx_args[@]}")
+            ;;
+        *)
+            logr "Unknown agent tool: $AGENT_TOOL (valid: copilot, claude, gemini, codex)"
+            return 1
+            ;;
+    esac
+
+    local exit_code=$?
+
+    # Create PR if agent pushed successfully
+    if [[ $exit_code -eq 0 ]] && command -v gh &>/dev/null; then
+        local remote_branch
+        remote_branch=$(git -C "$wt_path" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo "")
+        if [[ -n "$remote_branch" ]]; then
+            log "Creating PR..."
+            local pr_title
+            pr_title=$(bd_locked show "$bead_id" --json 2>/dev/null \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('title','Work on $bead_id'))" 2>/dev/null \
+                || echo "Work on $bead_id")
+            (cd "$wt_path" && gh pr create \
+                --title "feat($bead_id): $pr_title" \
+                --body "Automated PR for bead \`$bead_id\`. Created by abr." \
+                --base main) 2>&1 | while read -r line; do
+                    log "  $line"
+                done
+            log "PR created."
+        else
+            log "No upstream — agent may not have pushed. Skipping PR."
+        fi
+    else
+        [[ $exit_code -ne 0 ]] && logr "Agent exited with code $exit_code"
+    fi
+
+    trap - EXIT
+    cleanup_worktree "$wt_path"
+
+    log "=== Finished bead: $bead_id (exit=$exit_code) ==="
+    return $exit_code
+}
+
+# --- Loop runner (re-invokes script for each bead = fresh session) ------------
+
+run_loop() {
+    local limit_msg=""
+    [[ "$LOOP_MAX" -gt 0 ]] && limit_msg=" (max $LOOP_MAX)"
+    log "=== Loop mode: fresh session per bead${limit_msg}, Ctrl+C to stop gracefully ==="
+    log "PID: $$  |  Or: touch $STOP_FILE  |  Or: kill -USR1 $$"
+
+    # Clean up any stale stop file from a previous run
+    rm -f "$STOP_FILE"
+
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
+    local iteration=0
+    local completed=0
+
+    while true; do
+        iteration=$((iteration + 1))
+
+        # Check graceful stop before picking next bead
+        if should_stop; then
+            log "Graceful stop: exiting after $completed bead(s)."
+            break
+        fi
+
+        # Check iteration limit
+        if [[ "$LOOP_MAX" -gt 0 && $completed -ge $LOOP_MAX ]]; then
+            log "Loop limit reached ($LOOP_MAX). Finished $completed bead(s)."
+            break
+        fi
+
+        # Sync beads to see latest state (other agents may have closed beads)
+        bd_locked dolt pull 2>/dev/null || true
+
+        local bead_id
+        bead_id=$(pick_next_bead)
+
+        if [[ -z "$bead_id" ]]; then
+            log "No more ready beads. Loop finished after $completed bead(s)."
+            break
+        fi
+
+        log "Loop iteration $iteration (completed $completed${limit_msg}): picked bead $bead_id"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log "[DRY RUN] Would spawn fresh session for $bead_id, then pick next..."
+            break
+        fi
+
+        # Claim from main repo BEFORE spawning subprocess so parallel
+        # loops see the bead as taken on their next pick_next_bead call.
+        if ! claim_bead "$bead_id"; then
+            log "Bead $bead_id already claimed — skipping to next."
+            sleep $(( (RANDOM % 2) + 1 ))
+            continue
+        fi
+
+        # Re-invoke this script as a subprocess — completely fresh session
+        local loop_invoke_flags=(--bead "$bead_id" --agent "$AGENT_TOOL")
+        [[ -n "$MODEL" ]] && loop_invoke_flags+=(--model "$MODEL")
+        "$script_path" "${loop_invoke_flags[@]}" || true
+        completed=$((completed + 1))
+
+        log "Loop: bead $bead_id session closed ($completed completed). Picking next..."
+        sleep 2  # Brief pause between sessions
+    done
+
+    rm -f "$STOP_FILE"
+}
+
+# --- Tmux launcher (parallel panes) ------------------------------------------
+
+launch_tmux() {
+    if ! command -v tmux &>/dev/null; then
+        logr "tmux is required for --parallel. Install with: brew install tmux"
+        exit 1
+    fi
+
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
+
+    # Build the flags each pane should use
+    local agent_model_flags="--agent '$AGENT_TOOL'"
+    [[ -n "$MODEL" ]] && agent_model_flags+=" --model '$MODEL'"
+    local pane_flags="$agent_model_flags"
+    if [[ "$LOOP_MODE" == "true" ]]; then
+        if [[ "$LOOP_MAX" -gt 0 ]]; then
+            pane_flags+=" --loop-${LOOP_MAX}"
+        else
+            pane_flags+=" --loop"
+        fi
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        local session_exists="no"
+        tmux has-session -t "$TMUX_SESSION" 2>/dev/null && session_exists="yes"
+
+        if [[ "$session_exists" == "yes" && "$NEW_TMUX" != "true" ]]; then
+            log "[DRY RUN] Would add $PARALLEL pane(s) to existing tmux session '$TMUX_SESSION'"
+        elif [[ "$session_exists" == "yes" && "$NEW_TMUX" == "true" ]]; then
+            log "[DRY RUN] Would create a new tmux session (existing '$TMUX_SESSION' kept) with $PARALLEL pane(s)"
+        else
+            log "[DRY RUN] Would create tmux session '$TMUX_SESSION' with $PARALLEL pane(s)"
+        fi
+        log "[DRY RUN] Each pane runs: abr $pane_flags"
+        if [[ "$LOOP_MODE" == "true" ]]; then
+            log "[DRY RUN] Each pane loops with fresh sessions per bead"
+        else
+            log "[DRY RUN] Each pane works one bead then exits"
+        fi
+        log ""
+        log "[DRY RUN] Ready beads:"
+        bd_locked ready 2>/dev/null
+        return 0
+    fi
+
+    # Check if tmux session already exists
+    local session_exists=false
+    tmux has-session -t "$TMUX_SESSION" 2>/dev/null && session_exists=true
+
+    if [[ "$session_exists" == "true" && "$NEW_TMUX" == "true" ]]; then
+        # Find next available session name (append -2, -3, etc.)
+        local base_name="$TMUX_SESSION"
+        local suffix=2
+        while tmux has-session -t "${base_name}-${suffix}" 2>/dev/null; do
+            suffix=$((suffix + 1))
+        done
+        TMUX_SESSION="${base_name}-${suffix}"
+        log "Existing session found. Creating new session: $TMUX_SESSION"
+        session_exists=false
+    fi
+
+    # Helper to build the command for a pane
+    pane_cmd() {
+        local flags="$1"
+        echo "cd '$REPO_ROOT' && '$script_path' $flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read"
+    }
+
+    if [[ "$LOOP_MODE" == "true" ]]; then
+        # Loop mode: each pane self-loops, no need to pre-assign beads
+        if [[ "$session_exists" == "true" ]]; then
+            log "Adding $PARALLEL looping pane(s) to existing tmux session '$TMUX_SESSION'..."
+            local loop_flag="--loop"
+            [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
+            for (( i=0; i<PARALLEL; i++ )); do
+                tmux split-window -t "$TMUX_SESSION" \
+                    "sleep $((i * 5)) && $(pane_cmd "$loop_flag $agent_model_flags")"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        else
+            local loop_flag="--loop"
+            [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
+            log "Creating tmux session '$TMUX_SESSION' with $PARALLEL looping pane(s)..."
+            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 \
+                "$(pane_cmd "$loop_flag $agent_model_flags")"
+            tmux rename-window -t "$TMUX_SESSION" "agents"
+
+            for (( i=1; i<PARALLEL; i++ )); do
+                # Stagger start so agents don't race on the same bead
+                tmux split-window -t "$TMUX_SESSION" \
+                    "sleep $((i * 3)) && $(pane_cmd "$loop_flag $agent_model_flags")"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        fi
+    else
+        # Non-loop: pre-assign one bead per pane
+        local beads_to_run=()
+        if [[ -n "$TARGET_BEAD" ]]; then
+            beads_to_run+=("$TARGET_BEAD")
+        else
+            while IFS= read -r bead_id; do
+                [[ -n "$bead_id" ]] && beads_to_run+=("$bead_id")
+            done < <(pick_n_beads "$PARALLEL")
+        fi
+
+        if [[ ${#beads_to_run[@]} -eq 0 ]]; then
+            log "No ready beads found. Run 'bd ready' to check status."
+            exit 0
+        fi
+
+        local total=${#beads_to_run[@]}
+        [[ $total -gt $PARALLEL ]] && total=$PARALLEL
+
+        if [[ "$session_exists" == "true" ]]; then
+            log "Adding $total pane(s) to existing tmux session '$TMUX_SESSION'..."
+            for (( i=0; i<total; i++ )); do
+                local bead="${beads_to_run[$i]}"
+                tmux split-window -t "$TMUX_SESSION" \
+                    "sleep $((i * 5)) && $(pane_cmd "--bead '$bead' $agent_model_flags")"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        else
+            log "Creating tmux session '$TMUX_SESSION' with $total pane(s)..."
+            local first_bead="${beads_to_run[0]}"
+            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 \
+                "$(pane_cmd "--bead '$first_bead' $agent_model_flags")"
+            tmux rename-window -t "$TMUX_SESSION" "agents"
+
+            for (( i=1; i<total; i++ )); do
+                local bead="${beads_to_run[$i]}"
+                tmux split-window -t "$TMUX_SESSION" \
+                    "sleep $((i * 5)) && $(pane_cmd "--bead '$bead' $agent_model_flags")"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        fi
+    fi
+
+    tmux select-layout -t "$TMUX_SESSION" tiled
+
+    log "Tmux session: $TMUX_SESSION"
+    [[ "$session_exists" == "true" ]] && log "Added $PARALLEL pane(s) to existing session."
+    [[ "$LOOP_MODE" == "true" ]] && log "Mode: each pane loops (fresh session per bead)"
+    [[ "$LOOP_MODE" != "true" ]] && log "Mode: each pane works one bead then exits"
+    log ""
+    log "  Attach:  tmux attach -t $TMUX_SESSION"
+    log "  Kill:    tmux kill-session -t $TMUX_SESSION"
+    log ""
+
+    if [[ -z "${TMUX:-}" ]]; then
+        exec tmux attach -t "$TMUX_SESSION"
+    else
+        log "(Already inside tmux — switch with: tmux switch -t $TMUX_SESSION)"
+    fi
+}
+
+# --- Review prompt builder -----------------------------------------------------
+
+build_review_prompt() {
+    local pr_number="$1"
+    local bead_id="$2"
+    local bead_info="$3"
+    local diff="$4"
+    local pr_comments="$5"
+    local quality_cmds
+    quality_cmds=$(detect_quality_commands)
+
+    local comments_section=""
+    if [[ -n "$pr_comments" && "$pr_comments" != "No comments" ]]; then
+        comments_section="
+## PR Comments & Review Feedback
+The following comments have been left on this PR. Consider them as additional context
+for your review — they may highlight real issues, but use your own judgment rather than
+treating them as directives.
+
+${pr_comments}
+"
+    fi
+
+    cat <<PROMPT
+You are an autonomous AI code reviewer. You are reviewing PR #${pr_number} which was created by an automated agent for bead ${bead_id}.
+
+## Bead Details
+${bead_info}
+
+## PR Diff
+\`\`\`diff
+${diff}
+\`\`\`
+${comments_section}
+## Your Review Workflow (follow EXACTLY)
+
+### Step 1: Run Quality Gates
+Run these checks from the repo root:
+${quality_cmds}
+Record any failures.
+
+### Step 2: Evaluate Against Acceptance Criteria
+Check whether the code in the diff actually satisfies the bead's acceptance criteria (shown above).
+Consider:
+- Does the code do what the bead asks for, or is it just a placeholder/stub?
+- Are there bugs, type errors, or logic issues?
+- Does it follow the patterns used elsewhere in the codebase?
+- Are there security issues?
+
+### Step 3: Render Your Verdict
+Create a file called \`.agent-review.json\` in the repo root with your verdict:
+
+If the PR passes:
+\`\`\`json
+{
+  "verdict": "approve",
+  "summary": "Brief explanation of why it passes"
+}
+\`\`\`
+
+If the PR needs changes:
+\`\`\`json
+{
+  "verdict": "reject",
+  "summary": "Brief explanation of what's wrong",
+  "issues": ["issue 1 description", "issue 2 description"]
+}
+\`\`\`
+
+## Rules
+- Be strict: placeholders, stubs, or incomplete implementations should be rejected
+- Quality gate failures are automatic rejections
+- If acceptance criteria are missing or vague, evaluate based on the bead description
+- Do NOT modify any code — you are only reviewing
+- Do NOT merge or close the PR — just write the verdict file
+- Do NOT run git push or modify git state
+PROMPT
+}
+
+# --- Review runner (review open agent PRs) ------------------------------------
+
+extract_bead_id_from_pr() {
+    local pr_json="$1"
+    # Extract bead ID from PR title: "feat(yvs-49h.7.3): ..." → "yvs-49h.7.3"
+    # Falls back to branch name conversion if title doesn't match
+    echo "$pr_json" | python3 -c "
+import sys, json, re
+data = json.load(sys.stdin)
+title = data.get('title', '')
+# Try extracting from feat(<bead-id>): pattern
+m = re.search(r'feat\(([^)]+)\)', title)
+if m:
+    print(m.group(1))
+else:
+    # Fallback: extract from branch name
+    branch = data.get('headRefName', '').replace('agent/', '')
+    # Find the project prefix (e.g. yvs-49h) then convert remaining hyphens to dots
+    m2 = re.match(r'^([a-z]+-[0-9a-z]+?)(?:[-.](\d.*))?$', branch)
+    if m2:
+        prefix = m2.group(1)
+        suffix = ('.' + m2.group(2).replace('-', '.')) if m2.group(2) else ''
+        print(prefix + suffix)
+    else:
+        print(branch)
+" 2>/dev/null || echo ""
+}
+
+review_one_pr() {
+    local pr_number="$1"
+
+    log "--- Reviewing PR #${pr_number} ---"
+
+    # Get PR metadata
+    local pr_json
+    pr_json=$(gh pr view "$pr_number" --json headRefName,title,state,additions,deletions,files 2>&1) || {
+        logr "Failed to fetch PR #${pr_number}: $pr_json"
+        return 1
+    }
+
+    local branch state
+    branch=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['headRefName'])" 2>/dev/null)
+    state=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])" 2>/dev/null)
+
+    if [[ "$state" != "OPEN" ]]; then
+        log "PR #${pr_number} is $state — skipping."
+        return 0
+    fi
+
+    # Extract bead ID from PR title (or branch name as fallback)
+    local bead_id
+    bead_id=$(extract_bead_id_from_pr "$pr_json")
+    log "PR #${pr_number}: branch=$branch  bead=$bead_id"
+
+    # Get bead details
+    local bead_info
+    bead_info=$(bd_locked show "$bead_id" 2>&1) || {
+        logr "Could not find bead '$bead_id' — skipping PR #${pr_number}"
+        return 1
+    }
+
+    # Get the diff
+    local diff
+    diff=$(gh pr diff "$pr_number" 2>&1) || {
+        logr "Failed to fetch diff for PR #${pr_number}"
+        return 1
+    }
+
+    # Get PR comments and review feedback
+    local pr_comments
+    pr_comments=$(gh pr view "$pr_number" --json comments,reviews --jq '
+        ([.comments[] | "**@\(.author.login)** (comment):\n\(.body)"] +
+         [.reviews[] | select(.body != "") | "**@\(.author.login)** (review: \(.state)):\n\(.body)"]) |
+        if length == 0 then "No comments" else join("\n\n---\n\n") end
+    ' 2>/dev/null || echo "No comments")
+    [[ -n "$pr_comments" ]] || pr_comments="No comments"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        local files
+        files=$(echo "$pr_json" | python3 -c "
+import sys, json
+files = json.load(sys.stdin).get('files', [])
+for f in files:
+    print(f'  {f[\"path\"]} (+{f[\"additions\"]}/-{f[\"deletions\"]})')
+" 2>/dev/null)
+        log "[DRY RUN] Would review PR #${pr_number}:"
+        log "  Branch: $branch"
+        log "  Bead:   $bead_id"
+        log "  Files:"
+        echo "$files" | while read -r line; do log "  $line"; done
+        return 0
+    fi
+
+    # Check out the PR in a worktree for quality gate checks
+    local wt_path="${WORKTREE_BASE}/review-pr-${pr_number}"
+    mkdir -p "$(dirname "$wt_path")"
+
+    cd "$REPO_ROOT"
+    log "Creating review worktree..."
+    git worktree add "$wt_path" "origin/$branch" --detach 2>&1 | while read -r line; do
+        log "  $line"
+    done
+
+    copy_env_files "$wt_path"
+    install_deps "$wt_path"
+
+    trap "cleanup_worktree '$wt_path'" EXIT
+
+    # Build and run the review agent
+    local prompt
+    prompt=$(build_review_prompt "$pr_number" "$bead_id" "$bead_info" "$diff" "$pr_comments")
+    local verdict_file="${wt_path}/.agent-review.json"
+    rm -f "$verdict_file"
+
+    log "Launching $AGENT_TOOL review agent..."
+
+    # Resolve model and effort from --model flag
+    resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
+
+    case "$AGENT_TOOL" in
+        copilot)
+            local cp_model="${MODEL_RESOLVED:-claude-sonnet-4.6}"
+            local cp_effort="${EFFORT_RESOLVED:-high}"
+            (cd "$wt_path" && "$COPILOT_CLI" \
+                --prompt "$prompt" \
+                --model "$cp_model" \
+                --effort "$cp_effort" \
+                --allow-all \
+                --autopilot) || true
+            ;;
+        claude)
+            local cl_args=(--prompt "$prompt" --allowedTools "Bash,Read,Write,Grep,Glob" --yes)
+            [[ -n "$MODEL_RESOLVED" ]] && cl_args+=(--model "$MODEL_RESOLVED")
+            (cd "$wt_path" && claude "${cl_args[@]}") || true
+            ;;
+        gemini)
+            local gm_args=(--prompt "$prompt" --yolo)
+            [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
+            (cd "$wt_path" && gemini "${gm_args[@]}") || true
+            ;;
+        codex)
+            local cx_args=(exec --full-auto)
+            [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
+            [[ -n "$EFFORT_RESOLVED" ]] && cx_args+=(-c "model_reasoning_effort=\"$EFFORT_RESOLVED\"")
+            cx_args+=("$prompt")
+            (cd "$wt_path" && codex "${cx_args[@]}") || true
+            ;;
+    esac
+
+    # Parse the verdict
+    if [[ ! -f "$verdict_file" ]]; then
+        logr "Review agent did not produce a verdict file for PR #${pr_number}"
+        logr "Manual review required."
+        trap - EXIT
+        cleanup_worktree "$wt_path"
+        return 1
+    fi
+
+    local verdict summary issues
+    verdict=$(python3 -c "import json; print(json.load(open('$verdict_file'))['verdict'])" 2>/dev/null || echo "unknown")
+    summary=$(python3 -c "import json; print(json.load(open('$verdict_file'))['summary'])" 2>/dev/null || echo "No summary")
+    issues=$(python3 -c "
+import json
+data = json.load(open('$verdict_file'))
+for i, issue in enumerate(data.get('issues', []), 1):
+    print(f'{i}. {issue}')
+" 2>/dev/null || echo "")
+
+    log "Verdict: $verdict"
+    log "Summary: $summary"
+
+    case "$verdict" in
+        approve)
+            log "Merging PR #${pr_number}..."
+            local pr_title_text merge_output merge_rc
+            pr_title_text=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])" 2>/dev/null || echo "$bead_id")
+            merge_output=$(gh pr merge "$pr_number" --squash \
+                --subject "feat($bead_id): $pr_title_text" \
+                --body "Auto-merged after agent review.\n\n${summary}" \
+                2>&1) && merge_rc=0 || merge_rc=$?
+            while read -r line; do log "  $line"; done <<< "$merge_output"
+
+            if [[ $merge_rc -ne 0 ]] || echo "$merge_output" | grep -qi "conflict\|merge not clean\|not possible\|could not merge\|can't be merged"; then
+                log "Merge failed for PR #${pr_number}. Attempting to rebase onto main..."
+
+                # Try to rebase the PR branch onto main to resolve conflicts
+                local rebase_ok=false
+                (
+                    cd "$wt_path" &&
+                    git fetch origin main &&
+                    git checkout "$branch" 2>/dev/null &&
+                    git rebase origin/main
+                ) 2>&1 | while read -r line; do log "  rebase: $line"; done
+
+                if (cd "$wt_path" && git rebase --show-current-patch &>/dev/null); then
+                    # Rebase is still in progress (conflict) — abort it
+                    log "Rebase has conflicts that cannot be auto-resolved. Aborting rebase."
+                    (cd "$wt_path" && git rebase --abort 2>/dev/null) || true
+                else
+                    # Rebase may have succeeded — check if branch is ahead of main
+                    local rebase_status
+                    rebase_status=$(cd "$wt_path" && git status --porcelain 2>/dev/null)
+                    if [[ -z "$rebase_status" ]]; then
+                        rebase_ok=true
+                    fi
+                fi
+
+                if [[ "$rebase_ok" == "true" ]]; then
+                    log "Rebase succeeded. Force-pushing rebased branch..."
+                    (cd "$wt_path" && git push --force-with-lease origin "$branch") 2>&1 | while read -r line; do log "  $line"; done
+
+                    # Retry the merge
+                    log "Retrying merge for PR #${pr_number}..."
+                    local retry_output retry_rc
+                    retry_output=$(gh pr merge "$pr_number" --squash \
+                        --subject "feat($bead_id): $pr_title_text" \
+                        --body "Auto-merged after agent review (rebased to resolve conflicts).\n\n${summary}" \
+                        2>&1) && retry_rc=0 || retry_rc=$?
+                    while read -r line; do log "  $line"; done <<< "$retry_output"
+
+                    if [[ $retry_rc -eq 0 ]] && ! echo "$retry_output" | grep -qi "conflict\|not possible\|could not merge\|can't be merged"; then
+                        git push origin --delete "$branch" 2>/dev/null || true
+                        log "PR #${pr_number} merged after rebase and branch cleaned up."
+                    else
+                        logr "PR #${pr_number} APPROVED but merge still failed after rebase."
+                        logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
+                        bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
+                    fi
+                else
+                    logr "PR #${pr_number} APPROVED but has merge conflicts that could not be auto-resolved."
+                    logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
+                    bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
+                fi
+            else
+                # Merge succeeded — clean up remote branch
+                git push origin --delete "$branch" 2>/dev/null || true
+                log "PR #${pr_number} merged and branch cleaned up."
+            fi
+            ;;
+
+        reject)
+            log "Rejecting PR #${pr_number}..."
+            [[ -n "$issues" ]] && log "Issues found:" && while read -r line; do log "  $line"; done <<< "$issues"
+
+            # Post review comment on the PR
+            local comment="## Agent Review: Changes Requested\n\n${summary}\n"
+            if [[ -n "$issues" ]]; then
+                comment+="\n### Issues\n${issues}\n"
+            fi
+            comment+="\n---\n*Automated review by abr --review*"
+            printf '%b' "$comment" | gh pr comment "$pr_number" --body-file - 2>&1 | while read -r line; do
+                log "  $line"
+            done
+
+            # Reopen the bead so it can be reworked
+            bd_locked update "$bead_id" --status open --notes "PR #${pr_number} rejected by review agent: ${summary}" 2>/dev/null || true
+
+            # Create a follow-up bead with the specific fixes needed
+            if [[ -n "$issues" ]]; then
+                local fix_desc="Fix issues from PR #${pr_number} review for ${bead_id}:\n${issues}"
+                bd_locked create --title "Fix review issues for ${bead_id}" \
+                    --description "$(printf '%b' "$fix_desc")" \
+                    --parent "$bead_id" \
+                    --priority 1 \
+                    2>&1 | while read -r line; do log "  $line"; done
+                log "Created follow-up bead for fixes."
+            fi
+
+            # Close the PR
+            gh pr close "$pr_number" --comment "Closed by automated review. See review comment for details." \
+                2>&1 | while read -r line; do log "  $line"; done
+            log "PR #${pr_number} closed."
+            ;;
+
+        *)
+            logr "Unknown verdict '$verdict' for PR #${pr_number}. Manual review required."
+            ;;
+    esac
+
+    rm -f "$verdict_file"
+    trap - EXIT
+    cleanup_worktree "$wt_path"
+}
+
+run_review() {
+    if ! command -v gh &>/dev/null; then
+        logr "gh CLI is required for --review. Install with: brew install gh"
+        exit 1
+    fi
+
+    log "=== Review mode ==="
+
+    if [[ -n "$TARGET_PR" ]]; then
+        # Review a specific PR
+        review_one_pr "$TARGET_PR"
+        return
+    fi
+
+    # Find all open PRs created by agent-run.sh / abr
+    local pr_list
+    pr_list=$(gh pr list --state open --json number,headRefName,title --limit 100 2>/dev/null) || {
+        logr "Failed to list PRs."
+        return 1
+    }
+
+    # Filter to agent branches (agent/*)
+    local agent_prs
+    agent_prs=$(echo "$pr_list" | python3 -c "
+import sys, json
+prs = json.load(sys.stdin)
+agent_prs = [p for p in prs if p['headRefName'].startswith('agent/')]
+for p in agent_prs:
+    print(f\"{p['number']} {p['headRefName']} {p['title']}\")
+" 2>/dev/null || echo "")
+
+    if [[ -z "$agent_prs" ]]; then
+        log "No open agent PRs found."
+        return 0
+    fi
+
+    local count
+    count=$(echo "$agent_prs" | wc -l | tr -d ' ')
+    log "Found $count open agent PR(s):"
+    echo "$agent_prs" | while read -r line; do log "  $line"; done
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY RUN] Would review each PR above with $AGENT_TOOL"
+        [[ "$PARALLEL" -gt 0 ]] && log "[DRY RUN] Using $PARALLEL parallel tmux panes"
+        return 0
+    fi
+
+    # Parallel review via tmux
+    if [[ "$PARALLEL" -gt 0 ]]; then
+        if ! command -v tmux &>/dev/null; then
+            logr "tmux is required for --parallel. Install with: brew install tmux"
+            exit 1
+        fi
+
+        local script_path
+        script_path="$(command -v abr 2>/dev/null || echo "$0")"
+
+        # Collect PR numbers into an array
+        local pr_nums=()
+        while read -r pr_line; do
+            local pn
+            pn=$(echo "$pr_line" | awk '{print $1}')
+            [[ -n "$pn" ]] && pr_nums+=("$pn")
+        done <<< "$agent_prs"
+
+        local total=${#pr_nums[@]}
+        [[ $total -gt $PARALLEL ]] && total=$PARALLEL
+
+        local session_exists=false
+        tmux has-session -t "$TMUX_SESSION" 2>/dev/null && session_exists=true
+
+        local review_agent_flags="--agent '$AGENT_TOOL'"
+        [[ -n "$MODEL" ]] && review_agent_flags+=" --model '$MODEL'"
+
+        if [[ "$session_exists" == "true" ]]; then
+            log "Adding $total review pane(s) to existing tmux session '$TMUX_SESSION'..."
+            for (( i=0; i<total; i++ )); do
+                local cmd
+                cmd="cd '$REPO_ROOT' && sleep $((i * 3)) && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
+                tmux split-window -t "$TMUX_SESSION" "$cmd"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        else
+            log "Creating tmux session '$TMUX_SESSION' with $total review pane(s)..."
+            local first_cmd
+            first_cmd="cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[0]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
+            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 "$first_cmd"
+            tmux rename-window -t "$TMUX_SESSION" "reviews"
+
+            for (( i=1; i<total; i++ )); do
+                local cmd
+                cmd="cd '$REPO_ROOT' && sleep $((i * 3)) && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
+                tmux split-window -t "$TMUX_SESSION" "$cmd"
+                tmux select-layout -t "$TMUX_SESSION" tiled
+            done
+        fi
+
+        tmux select-layout -t "$TMUX_SESSION" tiled
+        log "Tmux session: $TMUX_SESSION ($total review panes)"
+        log "  Attach:  tmux attach -t $TMUX_SESSION"
+        log "  Kill:    tmux kill-session -t $TMUX_SESSION"
+
+        if [[ -z "${TMUX:-}" ]]; then
+            exec tmux attach -t "$TMUX_SESSION"
+        else
+            log "(Already inside tmux — switch with: tmux switch -t $TMUX_SESSION)"
+        fi
+        return 0
+    fi
+
+    # Review each PR sequentially
+    while read -r pr_line; do
+        local pr_num
+        pr_num=$(echo "$pr_line" | awk '{print $1}')
+        review_one_pr "$pr_num" || true
+        sleep 2  # Brief pause between reviews
+    done <<< "$agent_prs"
+
+    log "=== Review complete ==="
+}
+
+# --- Main entry point ---------------------------------------------------------
+
+main() {
+    cd "$REPO_ROOT"
+
+    # Verify required tools
+    for cmd in bd git python3; do
+        if ! command -v "$cmd" &>/dev/null; then
+            logr "Required command not found: $cmd"
+            exit 1
+        fi
+    done
+
+    # Verify beads is initialized (uses bd_locked to queue behind other agents)
+    local bd_ok=false bd_err=""
+    for attempt in 1 2 3; do
+        bd_err=$(bd_locked ready --json 2>&1 >/dev/null) && { bd_ok=true; break; }
+        log "Beads check failed (attempt $attempt/3), retrying in ${attempt}s..."
+        sleep "$attempt"
+    done
+    if [[ "$bd_ok" != "true" ]]; then
+        logr "Beads not accessible after 3 attempts. Last error: $bd_err"
+        logr "If this is a fresh repo, run 'bd init'. Otherwise a Dolt lock may be stuck."
+        exit 1
+    fi
+
+    # Resolve Copilot CLI path if needed
+    if [[ "$AGENT_TOOL" == "copilot" ]] && ! command -v "$COPILOT_CLI" &>/dev/null; then
+        local vscode_copilot="$HOME/Library/Application Support/Code/User/globalStorage/github.copilot-chat/copilotCli/copilot"
+        if [[ -x "$vscode_copilot" ]]; then
+            COPILOT_CLI="$vscode_copilot"
+        else
+            logr "Copilot CLI not found. Set COPILOT_CLI env var or install it."
+            exit 1
+        fi
+    fi
+
+    # Verify selected agent tool is installed
+    case "$AGENT_TOOL" in
+        claude) command -v claude &>/dev/null || { logr "Claude CLI not found."; exit 1; } ;;
+        gemini) command -v gemini &>/dev/null || { logr "Gemini CLI not found."; exit 1; } ;;
+        codex)  command -v codex &>/dev/null || { logr "Codex CLI not found. Install: npm i -g @openai/codex"; exit 1; } ;;
+    esac
+
+    # Sync beads
+    log "Syncing beads..."
+    bd_locked dolt pull 2>/dev/null || true
+
+    log "Repo: $REPO_ROOT"
+    log "Agent: $AGENT_TOOL | Pkg: $(detect_pkg_manager || echo 'none')"
+
+    # --- Dispatch based on mode ---
+
+    # Review mode — review open agent PRs
+    if [[ "$REVIEW_MODE" == "true" ]]; then
+        run_review
+        return
+    fi
+
+    # Parallel mode (tmux) — with or without loop
+    if [[ "$PARALLEL" -gt 0 ]]; then
+        launch_tmux
+        return
+    fi
+
+    # Loop mode (sequential, no tmux) — re-invokes script per bead
+    if [[ "$LOOP_MODE" == "true" ]]; then
+        run_loop
+        return
+    fi
+
+    # Default: single bead, single run
+    local bead_id
+    if [[ -n "$TARGET_BEAD" ]]; then
+        bead_id="$TARGET_BEAD"
+    else
+        bead_id=$(pick_next_bead)
+    fi
+
+    if [[ -z "$bead_id" ]]; then
+        log "No ready beads found. Run 'bd ready' to check status."
+        exit 0
+    fi
+
+    run_one_bead "$bead_id"
+}
+
+main "$@"

@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          tar -czf "dist/abr-${VERSION}.tar.gz" \
+            --transform "s,^,abr-${VERSION}/," \
+            bin/abr Makefile README.md LICENSE
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+
+      - name: Update Homebrew tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARBALL_URL="https://github.com/carlfranzon/agent-beads-runner/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          SHA256=$(curl -fsSL "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')
+
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/carlfranzon/homebrew-tap.git" tap-repo
+          cd tap-repo
+
+          cat > Formula/abr.rb <<EOF
+          class Abr < Formula
+            desc "Portable parallel AI agent launcher using git worktrees + beads"
+            homepage "https://github.com/carlfranzon/agent-beads-runner"
+            url "${TARBALL_URL}"
+            sha256 "${SHA256}"
+            license "MIT"
+
+            depends_on "git"
+            depends_on "python@3"
+
+            def install
+              bin.install "bin/abr"
+            end
+
+            test do
+              assert_match "abr #{version}", shell_output("#{bin}/abr --version")
+            end
+          end
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/abr.rb
+          git commit -m "abr ${VERSION}"
+          git push
