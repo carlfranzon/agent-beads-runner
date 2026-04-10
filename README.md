@@ -123,6 +123,26 @@ Example: `--model sonnet46-h` → Claude Sonnet 4.6 with high effort.
 
 Run `abr --help` for the full model table per agent.
 
+## Configuration
+
+Set defaults in `~/.config/abr/config` so you don't need `--agent` or `--model` every time:
+
+```
+agent = claude
+model = sonnet46-h
+```
+
+Precedence: `--flag` > environment variable > config file > built-in default.
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `agent` | `copilot` | Default agent backend |
+| `model` | *(per-agent)* | Default model short name |
+| `copilot_cli` | `copilot` | Path to Copilot CLI binary |
+| `tmux_session` | `abr-<repo>` | tmux session name |
+
+Override the config file location with `ABR_CONFIG` env var.
+
 ## Graceful Stop (loop mode)
 
 - Press **Ctrl+C** once to finish the current bead and stop

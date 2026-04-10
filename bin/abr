@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.5"
+ABR_VERSION="0.1.7"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -187,13 +187,32 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - Use `--new-tmux` to create a separate session
 - Override name with `TMUX_SESSION=<name>` env var
 
+## Config File
+
+Users can set defaults in `~/.config/abr/config` (override location with `ABR_CONFIG` env var):
+
+```
+agent = claude
+model = sonnet46-h
+```
+
+Precedence: `--flag` > env var > config file > built-in default.
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `agent` | `copilot` | Default agent backend |
+| `model` | *(per-agent)* | Default model short name |
+| `copilot_cli` | `copilot` | Path to Copilot CLI binary |
+| `tmux_session` | `abr-<repo>` | tmux session name |
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AGENT_TOOL` | `copilot` | Default agent backend |
+| `AGENT_TOOL` | `copilot` | Default agent backend (overrides config file) |
 | `COPILOT_CLI` | `copilot` | Path to Copilot CLI binary |
 | `TMUX_SESSION` | `abr-<repo>` | tmux session name |
+| `ABR_CONFIG` | `~/.config/abr/config` | Path to config file |
 
 ## Procedure
 
@@ -225,7 +244,34 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 REPO_NAME="$(basename "$REPO_ROOT")"
 WORKTREE_BASE="${REPO_ROOT}-worktrees"
-COPILOT_CLI="${COPILOT_CLI:-copilot}"
+
+# Load config file: ~/.config/abr/config (override with ABR_CONFIG env var)
+# Config sets defaults; env vars override config; --flags override everything.
+# Supported keys: agent, model, copilot_cli, tmux_session
+ABR_CONFIG="${ABR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/abr/config}"
+_cfg_agent="" _cfg_model="" _cfg_copilot_cli="" _cfg_tmux_session=""
+if [[ -f "$ABR_CONFIG" ]]; then
+    while IFS='=' read -r key value || [[ -n "$key" ]]; do
+        # Skip comments and blank lines
+        key="${key%%#*}"
+        key="$(echo "$key" | tr -d '[:space:]')"
+        [[ -z "$key" ]] && continue
+        # Strip optional surrounding quotes from value
+        value="${value#"${value%%[![:space:]]*}"}"   # trim leading whitespace
+        value="${value%"${value##*[![:space:]]}"}"   # trim trailing whitespace
+        value="${value#\"}" ; value="${value%\"}"
+        value="${value#\'}" ; value="${value%\'}"
+        case "$key" in
+            agent)        _cfg_agent="$value" ;;
+            model)        _cfg_model="$value" ;;
+            copilot_cli)  _cfg_copilot_cli="$value" ;;
+            tmux_session) _cfg_tmux_session="$value" ;;
+        esac
+    done < "$ABR_CONFIG"
+fi
+
+# Precedence: env var > config file > built-in default
+COPILOT_CLI="${COPILOT_CLI:-${_cfg_copilot_cli:-copilot}}"
 PARALLEL=0        # 0 = no tmux; N = number of tmux panes
 LOOP_MODE=false
 LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
@@ -234,9 +280,9 @@ DRY_RUN=false
 NEW_TMUX=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
-AGENT_TOOL="${AGENT_TOOL:-copilot}"  # copilot | claude | gemini | codex
-MODEL=""            # Model short name (e.g. sonnet46-h); empty = agent default
-TMUX_SESSION="${TMUX_SESSION:-abr-${REPO_NAME}}"
+AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
+MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
+TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
 
 # --- Parse arguments ----------------------------------------------------------
 
@@ -319,6 +365,21 @@ Modes compose:
 tmux behavior:
   If a tmux session already exists for this repo, new --parallel panes are added
   to it. Use --new-tmux to create a separate session (e.g. for a different agent).
+
+Config file (~/.config/abr/config):
+  Set defaults so you don't need --agent or --model every time.
+  Override location with ABR_CONFIG env var.
+  Precedence: --flag > env var > config file > built-in default.
+
+  Example ~/.config/abr/config:
+    agent = claude
+    model = sonnet46-h
+
+  Supported keys:
+    agent          Default agent backend (copilot, claude, gemini, codex)
+    model          Default model short name (e.g. sonnet46-h)
+    copilot_cli    Path to Copilot CLI binary
+    tmux_session   tmux session name
 
 Models (--model <name>):
   Use short names from the table, or pass a full model name directly.
@@ -625,25 +686,25 @@ except: pass
 " 2>/dev/null || true)
                 local run="${pkg_mgr} run"
                 [[ "$pkg_mgr" == "npm" ]] && run="npm run"
-                echo "$scripts" | grep -q "^lint$" && cmds+="   - \`${run} lint\`\n"
-                echo "$scripts" | grep -q "^typecheck$" && cmds+="   - \`${run} typecheck\`\n"
-                echo "$scripts" | grep -q "^test$" && cmds+="   - \`${run} test\`\n"
-                echo "$scripts" | grep -q "^build$" && cmds+="   - \`${run} build\`\n"
+                echo "$scripts" | grep -q "^lint$" && cmds+="   - `${run} lint`\n"
+                echo "$scripts" | grep -q "^typecheck$" && cmds+="   - `${run} typecheck`\n"
+                echo "$scripts" | grep -q "^test$" && cmds+="   - `${run} test`\n"
+                echo "$scripts" | grep -q "^build$" && cmds+="   - `${run} build`\n"
                 if [[ -f "${REPO_ROOT}/tsconfig.json" ]] && ! echo "$scripts" | grep -q "^typecheck$"; then
-                    cmds+="   - \`npx tsc --noEmit\` (typecheck)\n"
+                    cmds+="   - `npx tsc --noEmit` (typecheck)\n"
                 fi
             fi
             ;;
         bundle)
-            [[ -f "${REPO_ROOT}/Rakefile" ]] && cmds+="   - \`bundle exec rake\`\n" ;;
+            [[ -f "${REPO_ROOT}/Rakefile" ]] && cmds+="   - `bundle exec rake`\n" ;;
         pip)
             cmds+="   - Run any linters/tests configured in the project\n" ;;
         go)
-            cmds+="   - \`go vet ./...\`\n"
-            cmds+="   - \`go test ./...\`\n" ;;
+            cmds+="   - `go vet ./...`\n"
+            cmds+="   - `go test ./...`\n" ;;
         cargo)
-            cmds+="   - \`cargo check\`\n"
-            cmds+="   - \`cargo test\`\n" ;;
+            cmds+="   - `cargo check`\n"
+            cmds+="   - `cargo test`\n" ;;
     esac
 
     if [[ -z "$cmds" ]]; then
@@ -760,24 +821,24 @@ Work on bead: $bead_id
 
 ## Workflow (follow EXACTLY)
 
-1. Run \`bd prime\` to load the full beads workflow context
-2. Run \`bd show $bead_id\` to understand the task details and dependencies
-3. Verify the bead is claimed (already done by the launcher). If not, run \`bd update $bead_id --claim\`
+1. Run `bd prime` to load the full beads workflow context
+2. Run `bd show $bead_id` to understand the task details and dependencies
+3. Verify the bead is claimed (already done by the launcher). If not, run `bd update $bead_id --claim`
 4. Implement the changes required by the bead
 5. Run quality gates if code was changed:
 ${quality_cmds}6. Complete the session close protocol:
-   a. \`git add <changed files>\`
-   b. \`git commit -m "feat($bead_id): <concise description>"\`
-   c. \`bd close $bead_id\`
-   d. \`bd dolt push\`
-   e. \`git push --set-upstream origin \$(git branch --show-current)\`
-   f. \`git status\` — must show "up to date with origin"
+   a. `git add <changed files>`
+   b. `git commit -m "feat($bead_id): <concise description>"`
+   c. `bd close $bead_id`
+   d. `bd dolt push`
+   e. `git push --set-upstream origin \$(git branch --show-current)`
+   f. `git status` — must show "up to date with origin"
 
 ## Rules
 - Work ONLY on bead $bead_id — do not touch other beads
 - Do NOT modify files unrelated to this bead
-- If the bead is blocked or unclear, run \`bd update $bead_id --notes="<your concern>"\` and exit
-- If you create follow-up work, use \`bd create\` to file new beads
+- If the bead is blocked or unclear, run `bd update $bead_id --notes="<your concern>"` and exit
+- If you create follow-up work, use `bd create` to file new beads
 - Use non-interactive flags: cp -f, mv -f, rm -f
 - Do NOT use interactive editors (vim, nano, etc.)
 - NEVER skip the git push step — work is not done until pushed
@@ -883,7 +944,7 @@ run_one_bead() {
                 || echo "Work on $bead_id")
             (cd "$wt_path" && gh pr create \
                 --title "feat($bead_id): $pr_title" \
-                --body "Automated PR for bead \`$bead_id\`. Created by abr." \
+                --body "Automated PR for bead `$bead_id`. Created by abr." \
                 --base main) 2>&1 | while read -r line; do
                     log "  $line"
                 done
@@ -1157,9 +1218,9 @@ You are an autonomous AI code reviewer. You are reviewing PR #${pr_number} which
 ${bead_info}
 
 ## PR Diff
-\`\`\`diff
+```diff
 ${diff}
-\`\`\`
+```
 ${comments_section}
 ## Your Review Workflow (follow EXACTLY)
 
@@ -1177,24 +1238,24 @@ Consider:
 - Are there security issues?
 
 ### Step 3: Render Your Verdict
-Create a file called \`.agent-review.json\` in the repo root with your verdict:
+Create a file called `.agent-review.json` in the repo root with your verdict:
 
 If the PR passes:
-\`\`\`json
+```json
 {
   "verdict": "approve",
   "summary": "Brief explanation of why it passes"
 }
-\`\`\`
+```
 
 If the PR needs changes:
-\`\`\`json
+```json
 {
   "verdict": "reject",
   "summary": "Brief explanation of what's wrong",
   "issues": ["issue 1 description", "issue 2 description"]
 }
-\`\`\`
+```
 
 ## Rules
 - Be strict: placeholders, stubs, or incomplete implementations should be rejected
@@ -1511,12 +1572,12 @@ run_review() {
         return 1
     }
 
-    # Filter to agent branches (agent/*)
+    # Filter to agent branches (agent/*), sorted by PR number ascending (oldest first)
     local agent_prs
     agent_prs=$(echo "$pr_list" | python3 -c "
 import sys, json
 prs = json.load(sys.stdin)
-agent_prs = [p for p in prs if p['headRefName'].startswith('agent/')]
+agent_prs = sorted([p for p in prs if p['headRefName'].startswith('agent/')], key=lambda p: p['number'])
 for p in agent_prs:
     print(f\"{p['number']} {p['headRefName']} {p['title']}\")
 " 2>/dev/null || echo "")

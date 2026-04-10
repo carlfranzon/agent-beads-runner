@@ -97,13 +97,32 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - Use `--new-tmux` to create a separate session
 - Override name with `TMUX_SESSION=<name>` env var
 
+## Config File
+
+Users can set defaults in `~/.config/abr/config` (override location with `ABR_CONFIG` env var):
+
+```
+agent = claude
+model = sonnet46-h
+```
+
+Precedence: `--flag` > env var > config file > built-in default.
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `agent` | `copilot` | Default agent backend |
+| `model` | *(per-agent)* | Default model short name |
+| `copilot_cli` | `copilot` | Path to Copilot CLI binary |
+| `tmux_session` | `abr-<repo>` | tmux session name |
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AGENT_TOOL` | `copilot` | Default agent backend |
+| `AGENT_TOOL` | `copilot` | Default agent backend (overrides config file) |
 | `COPILOT_CLI` | `copilot` | Path to Copilot CLI binary |
 | `TMUX_SESSION` | `abr-<repo>` | tmux session name |
+| `ABR_CONFIG` | `~/.config/abr/config` | Path to config file |
 
 ## Procedure
 

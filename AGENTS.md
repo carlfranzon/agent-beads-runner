@@ -33,6 +33,7 @@ echo "$MODEL_RESOLVED $EFFORT_RESOLVED"
 
 - **Single-file architecture**: Everything lives in `bin/abr`. Do not split into multiple files.
 - **Version**: `ABR_VERSION` variable near top of `bin/abr`. Bump it for every release.
+- **Config file**: User defaults live in `~/.config/abr/config` (simple `key = value` format). Parsed with a while-read loop in the Configuration section. Precedence: `--flag` > env var > config file > built-in default.
 - **Model short names**: The `resolve_model_and_effort()` function maps short names to full model identifiers. Always support both compact (`sonnet46`) and dashed (`sonnet-46`) forms. Update the help text table when adding models.
 - **Agent backends**: Each agent (copilot, claude, gemini, codex) has its own case block in `resolve_model_and_effort()` AND in the agent launch sections (`run_one_bead`, `review_one_pr`). Changes to one must be mirrored to the other.
 - **Locking**: All `bd` commands that may write go through `bd_locked()` (mkdir-based mutex). Never call `bd` directly for write operations.
