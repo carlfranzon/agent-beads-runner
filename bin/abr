@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.12"
+ABR_VERSION="0.1.13"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1587,6 +1587,19 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 if [[ "$rebase_ok" == "true" ]]; then
                     log "Conflicts resolved. Force-pushing updated branch..."
                     (cd "$wt_path" && git push --force-with-lease origin "$branch") 2>&1 | while read -r line; do log "  $line"; done
+
+                    # Wait for GitHub to recalculate mergeable status after push
+                    log "Waiting for GitHub to update mergeable status..."
+                    local mergeable_status="" wait_attempts=0 max_wait=12
+                    while [[ $wait_attempts -lt $max_wait ]]; do
+                        mergeable_status=$(gh pr view "$pr_number" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
+                        if [[ "$mergeable_status" == "MERGEABLE" ]]; then
+                            break
+                        fi
+                        wait_attempts=$((wait_attempts + 1))
+                        log "  PR status: $mergeable_status (attempt $wait_attempts/$max_wait)..."
+                        sleep 5
+                    done
 
                     # Retry the merge
                     log "Retrying merge for PR #${pr_number}..."
