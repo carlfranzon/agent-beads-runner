@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.8"
+ABR_VERSION="0.1.9"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1188,6 +1188,46 @@ launch_tmux() {
     fi
 }
 
+# --- Conflict resolution prompt builder ----------------------------------------
+
+build_conflict_prompt() {
+    local pr_number="$1"
+    local bead_id="$2"
+    local conflicted_files="$3"
+
+    cat <<PROMPT
+You are an autonomous AI coding agent resolving merge conflicts for PR #${pr_number} (bead ${bead_id}).
+
+## Situation
+This PR was approved by review but cannot be merged because of conflicts with the main branch.
+A \`git merge origin/main\` has been started and the following files have conflicts:
+
+${conflicted_files}
+
+## Your Task (follow EXACTLY)
+
+1. For each conflicted file, read the file and examine the conflict markers (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`)
+2. Understand what BOTH sides intended:
+   - The HEAD side (above \`=======\`) is the PR's changes — preserve the feature work
+   - The incoming side (below \`=======\`) is from main — incorporate any updates
+3. Resolve each conflict by editing the file to combine both sides correctly:
+   - Keep the PR's feature changes intact
+   - Integrate any non-conflicting updates from main
+   - If both sides changed the same thing, prefer the PR's version unless main has a clear bug fix
+   - Ensure the result compiles and makes logical sense
+4. After resolving each file, run \`git add <file>\` to mark it resolved
+5. Once ALL conflicts are resolved, run \`git commit --no-edit\` to finish the merge
+6. Do NOT run \`git push\` — the caller will handle that
+
+## Rules
+- Do NOT modify files that are not in the conflict list
+- Do NOT delete conflict markers partially — every \`<<<<<<<\` / \`=======\` / \`>>>>>>>\` must be removed
+- If you are unsure about a conflict, prefer the PR's version (HEAD side)
+- Do NOT create new files
+- Do NOT run any build or test commands — just resolve conflicts
+PROMPT
+}
+
 # --- Review prompt builder -----------------------------------------------------
 
 build_review_prompt() {
@@ -1462,9 +1502,79 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 ) 2>&1 | while read -r line; do log "  rebase: $line"; done
 
                 if (cd "$wt_path" && git rebase --show-current-patch &>/dev/null); then
-                    # Rebase is still in progress (conflict) — abort it
-                    log "Rebase has conflicts that cannot be auto-resolved. Aborting rebase."
+                    # Rebase is still in progress (conflict) — abort and try agent-assisted merge
+                    log "Rebase has conflicts. Aborting rebase and attempting agent-assisted merge..."
                     (cd "$wt_path" && git rebase --abort 2>/dev/null) || true
+
+                    # Start a merge instead (leaves conflict markers in files)
+                    local merge_conflict_ok=false
+                    (cd "$wt_path" && git merge origin/main --no-edit 2>&1) | while read -r line; do log "  merge: $line"; done
+
+                    # Check for unmerged paths
+                    local conflicted_files
+                    conflicted_files=$(cd "$wt_path" && git diff --name-only --diff-filter=U 2>/dev/null)
+
+                    if [[ -n "$conflicted_files" ]]; then
+                        log "Conflicted files:"
+                        while read -r f; do log "  $f"; done <<< "$conflicted_files"
+
+                        # Launch agent to resolve conflicts
+                        local conflict_prompt
+                        conflict_prompt=$(build_conflict_prompt "$pr_number" "$bead_id" "$conflicted_files")
+                        log "Launching $AGENT_TOOL agent to resolve conflicts..."
+
+                        case "$AGENT_TOOL" in
+                            copilot)
+                                local cp_model="${MODEL_RESOLVED:-claude-sonnet-4.6}"
+                                local cp_effort="${EFFORT_RESOLVED:-high}"
+                                (cd "$wt_path" && "$COPILOT_CLI" \
+                                    --prompt "$conflict_prompt" \
+                                    --model "$cp_model" \
+                                    --effort "$cp_effort" \
+                                    --allow-all \
+                                    --autopilot) || true
+                                ;;
+                            claude)
+                                local cl_args=(--prompt "$conflict_prompt" --allowedTools "Bash,Read,Write,Grep,Glob" --yes)
+                                [[ -n "$MODEL_RESOLVED" ]] && cl_args+=(--model "$MODEL_RESOLVED")
+                                (cd "$wt_path" && claude "${cl_args[@]}") || true
+                                ;;
+                            gemini)
+                                local gm_args=(--prompt "$conflict_prompt" --yolo)
+                                [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
+                                (cd "$wt_path" && gemini "${gm_args[@]}") || true
+                                ;;
+                            codex)
+                                local cx_args=(exec --full-auto)
+                                [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
+                                [[ -n "$EFFORT_RESOLVED" ]] && cx_args+=(-c "model_reasoning_effort=\"$EFFORT_RESOLVED\"")
+                                cx_args+=("$conflict_prompt")
+                                (cd "$wt_path" && codex "${cx_args[@]}") || true
+                                ;;
+                        esac
+
+                        # Check if agent resolved all conflicts
+                        local remaining_conflicts
+                        remaining_conflicts=$(cd "$wt_path" && git diff --name-only --diff-filter=U 2>/dev/null)
+                        if [[ -z "$remaining_conflicts" ]]; then
+                            # Ensure merge was committed (agent should have run git commit --no-edit)
+                            local merge_state
+                            merge_state=$(cd "$wt_path" && git rev-parse MERGE_HEAD 2>/dev/null) && {
+                                # MERGE_HEAD still exists — agent didn't commit; do it now
+                                log "Agent resolved conflicts but didn't commit. Committing merge..."
+                                (cd "$wt_path" && git commit --no-edit 2>&1) | while read -r line; do log "  $line"; done
+                            }
+                            merge_conflict_ok=true
+                        else
+                            log "Agent could not resolve all conflicts. Remaining:"
+                            while read -r f; do log "  $f"; done <<< "$remaining_conflicts"
+                            (cd "$wt_path" && git merge --abort 2>/dev/null) || true
+                        fi
+                    fi
+
+                    if [[ "$merge_conflict_ok" == "true" ]]; then
+                        rebase_ok=true
+                    fi
                 else
                     # Rebase may have succeeded — check if branch is ahead of main
                     local rebase_status
@@ -1475,7 +1585,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 fi
 
                 if [[ "$rebase_ok" == "true" ]]; then
-                    log "Rebase succeeded. Force-pushing rebased branch..."
+                    log "Conflicts resolved. Force-pushing updated branch..."
                     (cd "$wt_path" && git push --force-with-lease origin "$branch") 2>&1 | while read -r line; do log "  $line"; done
 
                     # Retry the merge
@@ -1483,7 +1593,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                     local retry_output retry_rc
                     retry_output=$(gh pr merge "$pr_number" --squash \
                         --subject "feat($bead_id): $pr_title_text" \
-                        --body "Auto-merged after agent review (rebased to resolve conflicts).\n\n${summary}" \
+                        --body "Auto-merged after agent review (conflicts resolved).\n\n${summary}" \
                         2>&1) && retry_rc=0 || retry_rc=$?
                     while read -r line; do log "  $line"; done <<< "$retry_output"
 
@@ -1496,7 +1606,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
                     fi
                 else
-                    logr "PR #${pr_number} APPROVED but has merge conflicts that could not be auto-resolved."
+                    logr "PR #${pr_number} APPROVED but has merge conflicts that the agent could not resolve."
                     logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
                     bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
                 fi

@@ -35,7 +35,7 @@ echo "$MODEL_RESOLVED $EFFORT_RESOLVED"
 - **Version**: `ABR_VERSION` variable near top of `bin/abr`. Bump it for every release.
 - **Config file**: User defaults live in `~/.config/abr/config` (simple `key = value` format). Parsed with a while-read loop in the Configuration section. Precedence: `--flag` > env var > config file > built-in default.
 - **Model short names**: The `resolve_model_and_effort()` function maps short names to full model identifiers. Always support both compact (`sonnet46`) and dashed (`sonnet-46`) forms. Update the help text table when adding models.
-- **Agent backends**: Each agent (copilot, claude, gemini, codex) has its own case block in `resolve_model_and_effort()` AND in the agent launch sections (`run_one_bead`, `review_one_pr`). Changes to one must be mirrored to the other.
+- **Agent backends**: Each agent (copilot, claude, gemini, codex) has its own case block in `resolve_model_and_effort()` AND in the agent launch sections (`run_one_bead`, `review_one_pr`, conflict resolution). Changes to one must be mirrored to the others.
 - **Locking**: All `bd` commands that may write go through `bd_locked()` (mkdir-based mutex). Never call `bd` directly for write operations.
 - **Commit messages**: Use conventional commits — `fix:`, `feat:`, `ci:`, `docs:`.
 - **Documentation sync**: When adding or changing features, always update ALL of these in the same commit: `--help` text in `bin/abr`, `README.md`, `AGENTS.md`, and `.github/skills/abr/SKILL.md` (which is the canonical source for the embedded SKILL in `--install-skill` and the symlinked copies in `.agents/` and `.claude/`).

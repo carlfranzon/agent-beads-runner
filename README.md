@@ -9,7 +9,7 @@ Run `abr` from any beads-enabled git repo to automatically pick a bead, create a
 - **Multi-agent support** — Copilot CLI, Claude Code, Gemini CLI, Codex CLI
 - **Parallel execution** — Run N agents simultaneously in tmux panes
 - **Loop mode** — Keep picking beads until none remain
-- **PR review** — Automated code review of agent-created PRs
+- **PR review** — Automated code review of agent-created PRs with agent-assisted conflict resolution
 - **Model shortcuts** — Short names for all major models with effort/reasoning control
 - **Graceful stop** — Ctrl+C, stop file, or SIGUSR1 to finish current bead and exit
 - **Auto-cleanup** — Worktrees are created and destroyed automatically
