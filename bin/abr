@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.0"
+ABR_VERSION="0.1.1"
 
 # --- Configuration -----------------------------------------------------------
 
