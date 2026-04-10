@@ -488,39 +488,39 @@ resolve_model_and_effort() {
         copilot)
             case "$base" in
                 # Claude
-                sonnet4)      MODEL_RESOLVED="claude-sonnet-4" ;;
-                sonnet45)     MODEL_RESOLVED="claude-sonnet-4.5" ;;
-                sonnet46)     MODEL_RESOLVED="claude-sonnet-4.6" ;;
-                opus45)       MODEL_RESOLVED="claude-opus-4.5" ;;
-                opus46)       MODEL_RESOLVED="claude-opus-4.6" ;;
-                haiku)        MODEL_RESOLVED="claude-haiku-4.5" ;;
+                sonnet4|sonnet-4)       MODEL_RESOLVED="claude-sonnet-4" ;;
+                sonnet45|sonnet-45)     MODEL_RESOLVED="claude-sonnet-4.5" ;;
+                sonnet46|sonnet-46)     MODEL_RESOLVED="claude-sonnet-4.6" ;;
+                opus45|opus-45)         MODEL_RESOLVED="claude-opus-4.5" ;;
+                opus46|opus-46)         MODEL_RESOLVED="claude-opus-4.6" ;;
+                haiku)                  MODEL_RESOLVED="claude-haiku-4.5" ;;
                 # GPT
-                gpt41)        MODEL_RESOLVED="gpt-4.1" ;;
-                gpt5m)        MODEL_RESOLVED="gpt-5-mini" ;;
-                gpt52)        MODEL_RESOLVED="gpt-5.2" ;;
-                gpt52c)       MODEL_RESOLVED="gpt-5.2-codex" ;;
-                gpt53c)       MODEL_RESOLVED="gpt-5.3-codex" ;;
-                gpt54)        MODEL_RESOLVED="gpt-5.4" ;;
-                gpt54m)       MODEL_RESOLVED="gpt-5.4-mini" ;;
+                gpt41|gpt-41)           MODEL_RESOLVED="gpt-4.1" ;;
+                gpt5m|gpt-5m)           MODEL_RESOLVED="gpt-5-mini" ;;
+                gpt52|gpt-52)           MODEL_RESOLVED="gpt-5.2" ;;
+                gpt52c|gpt-52c)         MODEL_RESOLVED="gpt-5.2-codex" ;;
+                gpt53c|gpt-53c)         MODEL_RESOLVED="gpt-5.3-codex" ;;
+                gpt54|gpt-54)           MODEL_RESOLVED="gpt-5.4" ;;
+                gpt54m|gpt-54m)         MODEL_RESOLVED="gpt-5.4-mini" ;;
                 # Gemini
-                gem25p)       MODEL_RESOLVED="gemini-2.5-pro" ;;
-                gem3f)        MODEL_RESOLVED="gemini-3-flash" ;;
-                gem31p)       MODEL_RESOLVED="gemini-3.1-pro" ;;
+                gem25p|gem-25p)         MODEL_RESOLVED="gemini-2.5-pro" ;;
+                gem3f|gem-3f)           MODEL_RESOLVED="gemini-3-flash" ;;
+                gem31p|gem-31p)         MODEL_RESOLVED="gemini-3.1-pro" ;;
                 # Other
-                grok)         MODEL_RESOLVED="grok-code-fast-1" ;;
-                raptor)       MODEL_RESOLVED="raptor-mini" ;;
-                goldeneye)    MODEL_RESOLVED="goldeneye" ;;
-                *)            MODEL_RESOLVED="$base" ;;  # pass-through
+                grok)                   MODEL_RESOLVED="grok-code-fast-1" ;;
+                raptor)                 MODEL_RESOLVED="raptor-mini" ;;
+                goldeneye)              MODEL_RESOLVED="goldeneye" ;;
+                *)                      MODEL_RESOLVED="$base" ;;  # pass-through
             esac ;;
         claude)
             case "$base" in
-                sonnet4)      MODEL_RESOLVED="claude-sonnet-4-0" ;;
-                sonnet45)     MODEL_RESOLVED="claude-sonnet-4-5" ;;
-                sonnet46)     MODEL_RESOLVED="claude-sonnet-4-6" ;;
-                opus45)       MODEL_RESOLVED="claude-opus-4-5" ;;
-                opus46)       MODEL_RESOLVED="claude-opus-4-6" ;;
-                haiku)        MODEL_RESOLVED="claude-haiku-4-5" ;;
-                *)            MODEL_RESOLVED="$base" ;;
+                sonnet4|sonnet-4)       MODEL_RESOLVED="claude-sonnet-4-0" ;;
+                sonnet45|sonnet-45)     MODEL_RESOLVED="claude-sonnet-4-5" ;;
+                sonnet46|sonnet-46)     MODEL_RESOLVED="claude-sonnet-4-6" ;;
+                opus45|opus-45)         MODEL_RESOLVED="claude-opus-4-5" ;;
+                opus46|opus-46)         MODEL_RESOLVED="claude-opus-4-6" ;;
+                haiku)                  MODEL_RESOLVED="claude-haiku-4-5" ;;
+                *)                      MODEL_RESOLVED="$base" ;;
             esac ;;
         gemini)
             case "$base" in
@@ -533,17 +533,17 @@ resolve_model_and_effort() {
             esac ;;
         codex)
             case "$base" in
-                gpt54)        MODEL_RESOLVED="gpt-5.4" ;;
-                gpt54m)       MODEL_RESOLVED="gpt-5.4-mini" ;;
-                gpt53c)       MODEL_RESOLVED="gpt-5.3-codex" ;;
-                gpt53cs)      MODEL_RESOLVED="gpt-5.3-codex-spark" ;;
-                gpt52)        MODEL_RESOLVED="gpt-5.2" ;;
-                gpt41)        MODEL_RESOLVED="gpt-4.1" ;;
-                gpt41m)       MODEL_RESOLVED="gpt-4.1-mini" ;;
-                gpt41n)       MODEL_RESOLVED="gpt-4.1-nano" ;;
-                o4m)          MODEL_RESOLVED="o4-mini" ;;
-                o3m)          MODEL_RESOLVED="o3-mini" ;;
-                *)            MODEL_RESOLVED="$base" ;;  # pass-through
+                gpt54|gpt-54)           MODEL_RESOLVED="gpt-5.4" ;;
+                gpt54m|gpt-54m)         MODEL_RESOLVED="gpt-5.4-mini" ;;
+                gpt53c|gpt-53c)         MODEL_RESOLVED="gpt-5.3-codex" ;;
+                gpt53cs|gpt-53cs)       MODEL_RESOLVED="gpt-5.3-codex-spark" ;;
+                gpt52|gpt-52)           MODEL_RESOLVED="gpt-5.2" ;;
+                gpt41|gpt-41)           MODEL_RESOLVED="gpt-4.1" ;;
+                gpt41m|gpt-41m)         MODEL_RESOLVED="gpt-4.1-mini" ;;
+                gpt41n|gpt-41n)         MODEL_RESOLVED="gpt-4.1-nano" ;;
+                o4m)                    MODEL_RESOLVED="o4-mini" ;;
+                o3m)                    MODEL_RESOLVED="o3-mini" ;;
+                *)                      MODEL_RESOLVED="$base" ;;  # pass-through
             esac ;;
         *)
             MODEL_RESOLVED="$base" ;;
