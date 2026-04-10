@@ -32,6 +32,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Use a different agent | `abr --agent claude` |
 | Use a specific model | `abr --agent copilot --model sonnet-46-h` |
 | Preview without executing | `abr --dry-run` |
+| Install skill for AI agents | `abr --install-skill` |
 
 ## Agents
 
