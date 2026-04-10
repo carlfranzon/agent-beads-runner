@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.9"
+ABR_VERSION="0.1.10"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -621,10 +621,10 @@ install_deps() {
 
     log "Installing dependencies ($pkg_mgr)..."
     case "$pkg_mgr" in
-        npm)    (cd "$wt_path" && npm install --silent 2>&1 | tail -3) ;;
-        pnpm)   (cd "$wt_path" && pnpm install --silent 2>&1 | tail -3) ;;
-        yarn)   (cd "$wt_path" && yarn install --silent 2>&1 | tail -3) ;;
-        bun)    (cd "$wt_path" && bun install 2>&1 | tail -3) ;;
+        npm)    (cd "$wt_path" && npm install --silent --ignore-scripts 2>&1 | tail -3) && (cd "$wt_path" && npm rebuild --silent 2>/dev/null | tail -3) || true ;;
+        pnpm)   (cd "$wt_path" && pnpm install --silent --ignore-scripts 2>&1 | tail -3) && (cd "$wt_path" && pnpm rebuild --silent 2>/dev/null | tail -3) || true ;;
+        yarn)   (cd "$wt_path" && yarn install --silent --ignore-scripts 2>&1 | tail -3) ;;
+        bun)    (cd "$wt_path" && bun install --ignore-scripts 2>&1 | tail -3) ;;
         bundle) (cd "$wt_path" && bundle install --quiet 2>&1 | tail -3) ;;
         pip)
             if [[ -f "${wt_path}/pyproject.toml" ]]; then
