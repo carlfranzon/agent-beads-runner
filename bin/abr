@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.11"
+ABR_VERSION="0.1.12"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -621,20 +621,20 @@ install_deps() {
 
     log "Installing dependencies ($pkg_mgr)..."
     case "$pkg_mgr" in
-        npm)    (cd "$wt_path" && npm install --silent --ignore-scripts 2>&1 | tail -3) && (cd "$wt_path" && npm rebuild --silent &>/dev/null) || true ;;
-        pnpm)   (cd "$wt_path" && pnpm install --silent --ignore-scripts 2>&1 | tail -3) && (cd "$wt_path" && pnpm rebuild --silent &>/dev/null) || true ;;
-        yarn)   (cd "$wt_path" && yarn install --silent --ignore-scripts 2>&1 | tail -3) ;;
-        bun)    (cd "$wt_path" && bun install --ignore-scripts 2>&1 | tail -3) ;;
-        bundle) (cd "$wt_path" && bundle install --quiet 2>&1 | tail -3) ;;
+        npm)    (cd "$wt_path" && npm install --ignore-scripts &>/dev/null && npm rebuild &>/dev/null) || true ;;
+        pnpm)   (cd "$wt_path" && pnpm install --ignore-scripts &>/dev/null && pnpm rebuild &>/dev/null) || true ;;
+        yarn)   (cd "$wt_path" && yarn install --ignore-scripts &>/dev/null) || true ;;
+        bun)    (cd "$wt_path" && bun install --ignore-scripts &>/dev/null) || true ;;
+        bundle) (cd "$wt_path" && bundle install --quiet &>/dev/null) || true ;;
         pip)
             if [[ -f "${wt_path}/pyproject.toml" ]]; then
-                (cd "$wt_path" && pip install -e . --quiet 2>&1 | tail -3)
+                (cd "$wt_path" && pip install -e . --quiet &>/dev/null) || true
             elif [[ -f "${wt_path}/requirements.txt" ]]; then
-                (cd "$wt_path" && pip install -r requirements.txt --quiet 2>&1 | tail -3)
+                (cd "$wt_path" && pip install -r requirements.txt --quiet &>/dev/null) || true
             fi
             ;;
-        go)     (cd "$wt_path" && go mod download 2>&1 | tail -3) ;;
-        cargo)  (cd "$wt_path" && cargo fetch --quiet 2>&1 | tail -3) ;;
+        go)     (cd "$wt_path" && go mod download &>/dev/null) || true ;;
+        cargo)  (cd "$wt_path" && cargo fetch --quiet &>/dev/null) || true ;;
     esac
 }
 
