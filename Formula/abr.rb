@@ -12,6 +12,13 @@ class Abr < Formula
     bin.install "bin/abr"
   end
 
+  def caveats
+    <<~EOS
+      To enable AI agents to discover abr commands, install the skill:
+        abr --install-skill
+    EOS
+  end
+
   test do
     assert_match "abr #{version}", shell_output("#{bin}/abr --version")
   end
