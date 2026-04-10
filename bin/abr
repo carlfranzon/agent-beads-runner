@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.7"
+ABR_VERSION="0.1.8"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -821,24 +821,24 @@ Work on bead: $bead_id
 
 ## Workflow (follow EXACTLY)
 
-1. Run `bd prime` to load the full beads workflow context
-2. Run `bd show $bead_id` to understand the task details and dependencies
-3. Verify the bead is claimed (already done by the launcher). If not, run `bd update $bead_id --claim`
+1. Run \`bd prime\` to load the full beads workflow context
+2. Run \`bd show $bead_id\` to understand the task details and dependencies
+3. Verify the bead is claimed (already done by the launcher). If not, run \`bd update $bead_id --claim\`
 4. Implement the changes required by the bead
 5. Run quality gates if code was changed:
 ${quality_cmds}6. Complete the session close protocol:
-   a. `git add <changed files>`
-   b. `git commit -m "feat($bead_id): <concise description>"`
-   c. `bd close $bead_id`
-   d. `bd dolt push`
-   e. `git push --set-upstream origin \$(git branch --show-current)`
-   f. `git status` — must show "up to date with origin"
+   a. \`git add <changed files>\`
+   b. \`git commit -m "feat($bead_id): <concise description>"\`
+   c. \`bd close $bead_id\`
+   d. \`bd dolt push\`
+   e. \`git push --set-upstream origin \$(git branch --show-current)\`
+   f. \`git status\` — must show "up to date with origin"
 
 ## Rules
 - Work ONLY on bead $bead_id — do not touch other beads
 - Do NOT modify files unrelated to this bead
-- If the bead is blocked or unclear, run `bd update $bead_id --notes="<your concern>"` and exit
-- If you create follow-up work, use `bd create` to file new beads
+- If the bead is blocked or unclear, run \`bd update $bead_id --notes="<your concern>"\` and exit
+- If you create follow-up work, use \`bd create\` to file new beads
 - Use non-interactive flags: cp -f, mv -f, rm -f
 - Do NOT use interactive editors (vim, nano, etc.)
 - NEVER skip the git push step — work is not done until pushed
@@ -1218,9 +1218,9 @@ You are an autonomous AI code reviewer. You are reviewing PR #${pr_number} which
 ${bead_info}
 
 ## PR Diff
-```diff
+\`\`\`diff
 ${diff}
-```
+\`\`\`
 ${comments_section}
 ## Your Review Workflow (follow EXACTLY)
 
@@ -1238,24 +1238,24 @@ Consider:
 - Are there security issues?
 
 ### Step 3: Render Your Verdict
-Create a file called `.agent-review.json` in the repo root with your verdict:
+Create a file called \`.agent-review.json\` in the repo root with your verdict:
 
 If the PR passes:
-```json
+\`\`\`json
 {
   "verdict": "approve",
   "summary": "Brief explanation of why it passes"
 }
-```
+\`\`\`
 
 If the PR needs changes:
-```json
+\`\`\`json
 {
   "verdict": "reject",
   "summary": "Brief explanation of what's wrong",
   "issues": ["issue 1 description", "issue 2 description"]
 }
-```
+\`\`\`
 
 ## Rules
 - Be strict: placeholders, stubs, or incomplete implementations should be rejected
