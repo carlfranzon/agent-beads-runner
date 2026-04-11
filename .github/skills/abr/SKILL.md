@@ -33,6 +33,8 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Use a specific model | `abr --agent copilot --model sonnet-46-h` |
 | Preview without executing | `abr --dry-run` |
 | Install skill for AI agents | `abr --install-skill` |
+| Setup default agent | `abr --set-default-agent <tool>` |
+| Setup default model | `abr --set-default-model <model>` |
 
 ## Agents
 
@@ -97,16 +99,16 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - Use `--new-tmux` to create a separate session
 - Override name with `TMUX_SESSION=<name>` env var
 
-## Config File
+## Config Files
 
-Users can set defaults in `~/.config/abr/config` (override location with `ABR_CONFIG` env var):
+Users can set defaults interactively via `abr --set-default-agent <tool>` and `abr --set-default-model <model>`. You can save these to your workspace (`.abr.conf`) or globally (`~/.config/abr/config`). Override global location with `ABR_CONFIG` env var.
 
 ```
 agent = claude
 model = sonnet46-h
 ```
 
-Precedence: `--flag` > env var > config file > built-in default.
+Precedence: `--flag` > env var > workspace config > global config > built-in default.
 
 | Key | Default | Purpose |
 |-----|---------|---------|

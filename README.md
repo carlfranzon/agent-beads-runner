@@ -94,6 +94,10 @@ abr --dry-run
 
 # Install abr skill for your AI agents
 abr --install-skill
+
+# Interactively configure default agent or model
+abr --set-default-agent claude
+abr --set-default-model sonnet46-h
 ```
 
 ## Options
@@ -111,6 +115,8 @@ abr --install-skill
 | `--model <name>` | Model short name (see below) |
 | `--new-tmux` | Create a separate tmux session |
 | `--install-skill` | Install abr skill to AI agent platforms (interactive) |
+| `--set-default-agent` | Configures your default agent interactively |
+| `--set-default-model` | Configures your default model interactively |
 | `--dry-run` | Show what would happen without executing |
 | `--version`, `-V` | Show version |
 | `-h`, `--help` | Show help |
@@ -125,14 +131,16 @@ Run `abr --help` for the full model table per agent.
 
 ## Configuration
 
-Set defaults in `~/.config/abr/config` so you don't need `--agent` or `--model` every time:
+Run `abr --set-default-agent <tool>` or `abr --set-default-model <model>` to interactively save defaults to your workspace (`.abr.conf`) or globally (`~/.config/abr/config`).
+
+Example `~/.config/abr/config` or `.abr.conf`:
 
 ```
 agent = claude
 model = sonnet46-h
 ```
 
-Precedence: `--flag` > environment variable > config file > built-in default.
+Precedence: `--flag` > environment variable > workspace config > global config > built-in default.
 
 | Key | Default | Purpose |
 |-----|---------|---------|

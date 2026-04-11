@@ -24,15 +24,25 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.14"
+ABR_VERSION="0.1.15"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
-# Handle --version, --help, --install-skill before anything else
-for arg in "$@"; do
-    case "$arg" in
+# Handle --version, --help, --install-skill, and setup flags before anything else
+_early_setup_agent=""
+_early_setup_model=""
+
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
         --version|-V) echo "abr $ABR_VERSION"; exit 0 ;;
         --install-skill) INSTALL_SKILL=true ;;
+        --set-default-agent)
+            _early_setup_agent="${args[i+1]:-}"
+            ;;
+        --set-default-model)
+            _early_setup_model="${args[i+1]:-}"
+            ;;
     esac
 done
 
@@ -125,6 +135,8 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Use a specific model | `abr --agent copilot --model sonnet-46-h` |
 | Preview without executing | `abr --dry-run` |
 | Install skill for AI agents | `abr --install-skill` |
+| Setup default agent | `abr --set-default-agent <tool>` |
+| Setup default model | `abr --set-default-model <model>` |
 
 ## Agents
 
@@ -189,16 +201,16 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - Use `--new-tmux` to create a separate session
 - Override name with `TMUX_SESSION=<name>` env var
 
-## Config File
+## Config Files
 
-Users can set defaults in `~/.config/abr/config` (override location with `ABR_CONFIG` env var):
+Users can set defaults interactively via `abr --set-default-agent <tool>` and `abr --set-default-model <model>`. You can save these to your workspace (`.abr.conf`) or globally (`~/.config/abr/config`). Override global location with `ABR_CONFIG` env var.
 
 ```
 agent = claude
 model = sonnet46-h
 ```
 
-Precedence: `--flag` > env var > config file > built-in default.
+Precedence: `--flag` > env var > workspace config > global config > built-in default.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -227,6 +239,7 @@ When the user wants to launch agents:
 5. Run the command
 6. For parallel mode, attach to tmux: `tmux attach -t abr-<repo-name>`
 7. Monitor progress in tmux panes; agents auto-clean up when done
+
 SKILL_CONTENT
             echo "  ✓ Installed to $dir ($name)"
         done
@@ -239,6 +252,62 @@ SKILL_CONTENT
     exit 0
 fi
 
+if [[ -n "$_early_setup_agent" ]] || [[ -n "$_early_setup_model" ]]; then
+    set_defaults() {
+        echo "abr — Set Default Configuration"
+        echo ""
+        
+        local target="global"
+        local repo_root=""
+        
+        if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+            echo "Where do you want to save these settings?"
+            echo "  1) Current workspace ($repo_root/.abr.conf)"
+            echo "  2) Globally (~/.config/abr/config)"
+            printf "Enter choice (1 or 2, default 1): "
+            read -r choice
+            if [[ "$choice" == "2" ]]; then
+                target="global"
+            else
+                target="workspace"
+            fi
+        else
+            echo "Not inside a git repository, saving globally."
+            target="global"
+        fi
+        
+        local conf_file=""
+        if [[ "$target" == "global" ]]; then
+            conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/abr/config"
+            mkdir -p "$(dirname "$conf_file")"
+        else
+            conf_file="$repo_root/.abr.conf"
+        fi
+        
+        touch "$conf_file"
+        
+        if [[ -n "$_early_setup_agent" ]]; then
+            grep -v "^agent[[:space:]]*=" "$conf_file" > "${conf_file}.tmp" || true
+            echo "agent = ${_early_setup_agent}" >> "${conf_file}.tmp"
+            mv "${conf_file}.tmp" "$conf_file"
+            echo "✓ Set default agent to: ${_early_setup_agent} (in $conf_file)"
+        fi
+        
+        if [[ -n "$_early_setup_model" ]]; then
+            grep -v "^model[[:space:]]*=" "$conf_file" > "${conf_file}.tmp" || true
+            echo "model = ${_early_setup_model}" >> "${conf_file}.tmp"
+            mv "${conf_file}.tmp" "$conf_file"
+            echo "✓ Set default model to: ${_early_setup_model} (in $conf_file)"
+        fi
+        
+        echo ""
+        echo "Done!"
+    }
+    
+    set_defaults
+    exit 0
+fi
+
 # --- Configuration -----------------------------------------------------------
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -248,29 +317,33 @@ REPO_NAME="$(basename "$REPO_ROOT")"
 WORKTREE_BASE="${REPO_ROOT}-worktrees"
 
 # Load config file: ~/.config/abr/config (override with ABR_CONFIG env var)
+# Also check workspace config (.abr.conf) which overrides global settings.
 # Config sets defaults; env vars override config; --flags override everything.
 # Supported keys: agent, model, copilot_cli, tmux_session
 ABR_CONFIG="${ABR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/abr/config}"
 _cfg_agent="" _cfg_model="" _cfg_copilot_cli="" _cfg_tmux_session=""
-if [[ -f "$ABR_CONFIG" ]]; then
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        # Skip comments and blank lines
-        key="${key%%#*}"
-        key="$(echo "$key" | tr -d '[:space:]')"
-        [[ -z "$key" ]] && continue
-        # Strip optional surrounding quotes from value
-        value="${value#"${value%%[![:space:]]*}"}"   # trim leading whitespace
-        value="${value%"${value##*[![:space:]]}"}"   # trim trailing whitespace
-        value="${value#\"}" ; value="${value%\"}"
-        value="${value#\'}" ; value="${value%\'}"
-        case "$key" in
-            agent)        _cfg_agent="$value" ;;
-            model)        _cfg_model="$value" ;;
-            copilot_cli)  _cfg_copilot_cli="$value" ;;
-            tmux_session) _cfg_tmux_session="$value" ;;
-        esac
-    done < "$ABR_CONFIG"
-fi
+
+for cfg_file in "$ABR_CONFIG" "${REPO_ROOT}/.abr.conf"; do
+    if [[ -f "$cfg_file" ]]; then
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            # Skip comments and blank lines
+            key="${key%%#*}"
+            key="$(echo "$key" | tr -d '[:space:]')"
+            [[ -z "$key" ]] && continue
+            # Strip optional surrounding quotes from value
+            value="${value#"${value%%[![:space:]]*}"}"   # trim leading whitespace
+            value="${value%"${value##*[![:space:]]}"}"   # trim trailing whitespace
+            value="${value#\"}" ; value="${value%\"}"
+            value="${value#\'}" ; value="${value%\'}"
+            case "$key" in
+                agent)        _cfg_agent="$value" ;;
+                model)        _cfg_model="$value" ;;
+                copilot_cli)  _cfg_copilot_cli="$value" ;;
+                tmux_session) _cfg_tmux_session="$value" ;;
+            esac
+        done < "$cfg_file"
+    fi
+done
 
 # Precedence: env var > config file > built-in default
 COPILOT_CLI="${COPILOT_CLI:-${_cfg_copilot_cli:-copilot}}"
@@ -334,6 +407,8 @@ Usage:
   abr --agent gemini                     Use Gemini CLI
   abr --agent copilot --model opus46-h   Use Copilot with Opus 4.6, high effort
   abr --install-skill                    Install abr skill for AI agents
+  abr --set-default-agent gemini         Interactively configure the default agent
+  abr --set-default-model gem31p         Interactively configure the default model
   abr --dry-run                          Preview without executing
 
 Graceful stop (loop mode):
@@ -353,6 +428,8 @@ Options:
   --model <name>        Model short name (see table below). Default: per-agent
   --new-tmux            Create a separate tmux session (default: add panes to existing)
   --install-skill       Install abr skill to AI agent platforms (interactive)
+  --set-default-agent   Configures your default agent interactively
+  --set-default-model   Configures your default model interactively
   --dry-run             Show what would happen without executing
   --version, -V         Show version
   -h, --help            Show this help
@@ -368,12 +445,14 @@ tmux behavior:
   If a tmux session already exists for this repo, new --parallel panes are added
   to it. Use --new-tmux to create a separate session (e.g. for a different agent).
 
-Config file (~/.config/abr/config):
-  Set defaults so you don't need --agent or --model every time.
-  Override location with ABR_CONFIG env var.
-  Precedence: --flag > env var > config file > built-in default.
+Config files:
+  Run `abr --set-default-agent <tool>` or `abr --set-default-model <model>`
+  to interactively save defaults to your workspace (.abr.conf) or globally 
+  (~/.config/abr/config).
+  Override global location with ABR_CONFIG env var.
+  Precedence: --flag > env var > workspace config > global config > built-in.
 
-  Example ~/.config/abr/config:
+  Example ~/.config/abr/config or .abr.conf:
     agent = claude
     model = sonnet46-h
 
