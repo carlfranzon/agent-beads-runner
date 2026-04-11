@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.16"
+ABR_VERSION="0.1.17"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -490,8 +490,8 @@ Models (--model <name>):
     gpt54          gpt-5.4                  effort (l/m/h/xh)
     gpt54m         gpt-5.4-mini             effort (l/m/h/xh)
     gem25p         gemini-2.5-pro           thinking
-    gem3f          gemini-3-flash           no
-    gem31p         gemini-3.1-pro           no
+    gem3f          gemini-3-flash-preview   no
+    gem31p         gemini-3.1-pro-preview   no
     grok           grok-code-fast-1         no
     raptor         raptor-mini              no
     goldeneye      goldeneye                no
@@ -514,8 +514,8 @@ Models (--model <name>):
     25-pro         gemini-2.5-pro           thinking
     25-flash       gemini-2.5-flash         thinking
     2-flash        gemini-2.0-flash         no
-    3-flash        gemini-3-flash           no
-    31-pro         gemini-3.1-pro           no
+    3-flash        gemini-3-flash-preview   no
+    31-pro         gemini-3.1-pro-preview   no
 
   Codex (--agent codex)                  default: gpt54
     Effort: supported via -c model_reasoning_effort (low/medium/high).
@@ -841,8 +841,8 @@ resolve_model_and_effort() {
                 gpt54m|gpt-54m)         MODEL_RESOLVED="gpt-5.4-mini" ;;
                 # Gemini
                 gem25p|gem-25p)         MODEL_RESOLVED="gemini-2.5-pro" ;;
-                gem3f|gem-3f)           MODEL_RESOLVED="gemini-3-flash" ;;
-                gem31p|gem-31p)         MODEL_RESOLVED="gemini-3.1-pro" ;;
+                gem3f|gem-3f)           MODEL_RESOLVED="gemini-3-flash-preview" ;;
+                gem31p|gem-31p)         MODEL_RESOLVED="gemini-3.1-pro-preview" ;;
                 # Other
                 grok)                   MODEL_RESOLVED="grok-code-fast-1" ;;
                 raptor)                 MODEL_RESOLVED="raptor-mini" ;;
@@ -861,12 +861,13 @@ resolve_model_and_effort() {
             esac ;;
         gemini)
             case "$base" in
-                25-pro)       MODEL_RESOLVED="gemini-2.5-pro" ;;
-                25-flash)     MODEL_RESOLVED="gemini-2.5-flash" ;;
-                2-flash)      MODEL_RESOLVED="gemini-2.0-flash" ;;
-                3-flash)      MODEL_RESOLVED="gemini-3-flash" ;;
-                31-pro)       MODEL_RESOLVED="gemini-3.1-pro" ;;
-                *)            MODEL_RESOLVED="$base" ;;
+                25-pro)                 MODEL_RESOLVED="gemini-2.5-pro" ;;
+                25-flash)               MODEL_RESOLVED="gemini-2.5-flash" ;;
+                2-flash)                MODEL_RESOLVED="gemini-2.0-flash" ;;
+                3-flash|gem3f|gem-3f)   MODEL_RESOLVED="gemini-3-flash-preview" ;;
+                31-pro|gem31p|gem-31p)  MODEL_RESOLVED="gemini-3.1-pro-preview" ;;
+                25-pro-p|gem25p|gem-25p) MODEL_RESOLVED="gemini-2.5-pro" ;;
+                *)                      MODEL_RESOLVED="$base" ;;
             esac ;;
         codex)
             case "$base" in
