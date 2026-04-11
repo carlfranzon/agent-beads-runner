@@ -48,8 +48,9 @@ if [[ "${INSTALL_SKILL:-}" == "true" ]]; then
         echo "  1) GitHub Copilot   ~/.copilot/skills/abr/"
         echo "  2) Claude Code      ~/.claude/skills/abr/"
         echo "  3) Gemini           ~/.gemini/extensions/abr/"
-        echo "  4) Generic agents   ~/.agents/skills/abr/"
-        echo "  5) All of the above"
+        echo "  4) Codex            ~/.codex/skills/abr/"
+        echo "  5) Generic agents   ~/.agents/skills/abr/"
+        echo "  6) All of the above"
         echo ""
         printf "Enter choices (comma-separated, e.g. 1,2,3): "
         read -r choices
@@ -66,11 +67,12 @@ if [[ "${INSTALL_SKILL:-}" == "true" ]]; then
             case "$pick" in
                 1) platforms+=("GitHub Copilot");  dirs+=("$HOME/.copilot/skills/abr") ;;
                 2) platforms+=("Claude Code");     dirs+=("$HOME/.claude/skills/abr") ;;
-                3) platforms+=("Gemini");           dirs+=("$HOME/.gemini/extensions/abr") ;;
-                4) platforms+=("Generic agents");   dirs+=("$HOME/.agents/skills/abr") ;;
-                5)
-                    platforms=("GitHub Copilot" "Claude Code" "Gemini" "Generic agents")
-                    dirs=("$HOME/.copilot/skills/abr" "$HOME/.claude/skills/abr" "$HOME/.gemini/extensions/abr" "$HOME/.agents/skills/abr")
+                3) platforms+=("Gemini");          dirs+=("$HOME/.gemini/extensions/abr") ;;
+                4) platforms+=("Codex");           dirs+=("$HOME/.codex/skills/abr") ;;
+                5) platforms+=("Generic agents");  dirs+=("$HOME/.agents/skills/abr") ;;
+                6)
+                    platforms=("GitHub Copilot" "Claude Code" "Gemini" "Codex" "Generic agents")
+                    dirs=("$HOME/.copilot/skills/abr" "$HOME/.claude/skills/abr" "$HOME/.gemini/extensions/abr" "$HOME/.codex/skills/abr" "$HOME/.agents/skills/abr")
                     break
                     ;;
                 *) echo "Unknown choice: $pick (skipping)" ;;
