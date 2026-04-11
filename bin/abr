@@ -994,7 +994,7 @@ run_one_bead() {
             (cd "$wt_path" && claude "${cl_args[@]}")
             ;;
         gemini)
-            local gm_args=(--prompt "$prompt" --yolo)
+            local gm_args=(--prompt "$prompt" --approval-mode=yolo)
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
             (cd "$wt_path" && gemini "${gm_args[@]}")
             ;;
