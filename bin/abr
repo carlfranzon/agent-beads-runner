@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.17"
+ABR_VERSION="0.1.18"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1026,7 +1026,7 @@ run_one_bead() {
                 || echo "Work on $bead_id")
             (cd "$wt_path" && gh pr create \
                 --title "feat($bead_id): $pr_title" \
-                --body "Automated PR for bead `$bead_id`. Created by abr." \
+                --body "Automated PR for bead \`$bead_id\`. Created by abr." \
                 --base main) 2>&1 | while read -r line; do
                     log "  $line"
                 done
