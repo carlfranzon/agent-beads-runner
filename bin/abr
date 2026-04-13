@@ -24,7 +24,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.18"
+ABR_VERSION="0.1.19"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -906,9 +906,16 @@ Work on bead: $bead_id
 1. Run \`bd prime\` to load the full beads workflow context
 2. Run \`bd show $bead_id\` to understand the task details and dependencies
 3. Verify the bead is claimed (already done by the launcher). If not, run \`bd update $bead_id --claim\`
-4. Implement the changes required by the bead
-5. Run quality gates if code was changed:
-${quality_cmds}6. Complete the session close protocol:
+4. **Before making any changes**, establish the baseline lint/quality status:
+   - Capture current lint state: \`${quality_cmds}\` (redirect to file for later comparison)
+   - Note any existing failures in the baseline for context
+5. Implement the changes required by the bead
+6. Run quality gates if code was changed:
+${quality_cmds}7. **Report lint findings**: After implementing changes, record both:
+   - Any NEW lint errors in files you changed (these are blocking and must be fixed)
+   - Baseline lint errors that existed before (informational — not blocking for this bead)
+   - If new errors exist in your changed files, fix them before moving forward
+8. Complete the session close protocol:
    a. \`git add <changed files>\`
    b. \`git commit -m "feat($bead_id): <concise description>"\`
    c. \`bd close $bead_id\`
@@ -924,6 +931,7 @@ ${quality_cmds}6. Complete the session close protocol:
 - Use non-interactive flags: cp -f, mv -f, rm -f
 - Do NOT use interactive editors (vim, nano, etc.)
 - NEVER skip the git push step — work is not done until pushed
+- **Lint gate policy**: You must fix any NEW lint errors in files you changed. Pre-existing baseline errors are acceptable (separate lint-debt bead).
 PROMPT
 }
 
@@ -1346,10 +1354,26 @@ ${diff}
 ${comments_section}
 ## Your Review Workflow (follow EXACTLY)
 
-### Step 1: Run Quality Gates
-Run these checks from the repo root:
-${quality_cmds}
-Record any failures.
+### Step 1: Establish Baseline & Run Quality Gates
+
+1. Check out the main branch to establish baseline:
+   - \`git fetch origin main && git checkout origin/main\`
+   - Run: \`${quality_cmds}\` and capture the baseline error count (e.g., 80 lint errors)
+   - Save this count — we'll compare after the PR changes
+
+2. Check out the PR branch:
+   - \`git checkout origin/refs/pull/${pr_number}/head || git show-branch\` 
+   - Run the same quality commands again
+   - Compare: Are there NEW errors in files changed by this PR? Is the TOTAL error count higher?
+
+3. Determine lint verdict:
+   - **REJECT only if**:
+     - New lint errors appeared in files modified by this PR, OR
+     - Total lint error count increased vs. baseline
+   - **APPROVE if**:
+     - No new lint errors in changed files, AND
+     - Total lint count did not increase (even if baseline errors exist elsewhere)
+   - **Report baseline debt separately** (informational) — it's not a blocker for bead-scoped work
 
 ### Step 2: Evaluate Against Acceptance Criteria
 Check whether the code in the diff actually satisfies the bead's acceptance criteria (shown above).
@@ -1366,7 +1390,8 @@ If the PR passes:
 \`\`\`json
 {
   "verdict": "approve",
-  "summary": "Brief explanation of why it passes"
+  "summary": "Brief explanation of why it passes",
+  "baseline_lint_debt": "<number> pre-existing lint errors (informational)"
 }
 \`\`\`
 
@@ -1375,17 +1400,19 @@ If the PR needs changes:
 {
   "verdict": "reject",
   "summary": "Brief explanation of what's wrong",
-  "issues": ["issue 1 description", "issue 2 description"]
+  "issues": ["issue 1 description", "issue 2 description"],
+  "baseline_lint_debt": "<number> pre-existing lint errors (not blocking)"
 }
 \`\`\`
 
 ## Rules
-- Be strict: placeholders, stubs, or incomplete implementations should be rejected
-- Quality gate failures are automatic rejections
+- Be strict on: placeholders, stubs, incomplete implementations, NEW lint errors in changed files
+- Be lenient on: pre-existing baseline lint debt (it's tracked separately)
+- Only reject for: new lint errors, logic issues, acceptance criteria not met, security issues
 - If acceptance criteria are missing or vague, evaluate based on the bead description
 - Do NOT modify any code — you are only reviewing
 - Do NOT merge or close the PR — just write the verdict file
-- Do NOT run git push or modify git state
+- Do NOT run git push or modify git state beyond checking out branches
 PROMPT
 }
 
@@ -1547,7 +1574,7 @@ for f in files:
         return 1
     fi
 
-    local verdict summary issues
+    local verdict summary issues baseline_lint_debt
     verdict=$(python3 -c "import json; print(json.load(open('$verdict_file'))['verdict'])" 2>/dev/null || echo "unknown")
     summary=$(python3 -c "import json; print(json.load(open('$verdict_file'))['summary'])" 2>/dev/null || echo "No summary")
     issues=$(python3 -c "
@@ -1556,9 +1583,11 @@ data = json.load(open('$verdict_file'))
 for i, issue in enumerate(data.get('issues', []), 1):
     print(f'{i}. {issue}')
 " 2>/dev/null || echo "")
+    baseline_lint_debt=$(python3 -c "import json; print(json.load(open('$verdict_file')).get('baseline_lint_debt', ''))" 2>/dev/null || echo "")
 
     log "Verdict: $verdict"
     log "Summary: $summary"
+    [[ -n "$baseline_lint_debt" ]] && log "Baseline lint debt: $baseline_lint_debt"
 
     case "$verdict" in
         approve)

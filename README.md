@@ -168,6 +168,27 @@ Override the config file location with `ABR_CONFIG` env var.
 7. Creates a PR via `gh`
 8. Cleans up the worktree
 
+## Quality Gate & Lint Policy
+
+The review agent uses a **bead-scoped lint policy** to avoid blocking on pre-existing baseline lint debt:
+
+**Worker agents:**
+- Must fix any **new lint errors** in files they change
+- Pre-existing baseline errors are acceptable (tracked separately)
+- Report both baseline debt and new findings in commit notes
+
+**Review agents:**
+- ✅ **Approve** if: no new lint errors in changed files AND total lint count did not increase
+- ❌ **Reject** if: new lint errors in changed files OR total lint count increased
+- Non-blocking: Report pre-existing baseline debt as informational
+
+**Benefits:**
+- Unblocks single-bead work even if repo has baseline lint debt
+- Prevents regressions (no new errors, no increased count)
+- Separates lint hygiene (per-bead) from lint debt cleanup (separate epic)
+
+For managing accumulated lint debt, create a dedicated lint-reduction bead/epic. When baseline reaches 0, restore full-repo lint as a hard gate.
+
 ## License
 
 MIT
