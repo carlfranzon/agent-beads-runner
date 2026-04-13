@@ -92,6 +92,9 @@ abr --review --pr 5
 # Delete merged local agent/* branches
 abr --prune-local-branches
 
+# Delete merged remote agent/* branches (and stale remote refs)
+abr --prune-remote-branches
+
 # Preview what would happen
 abr --dry-run
 
@@ -115,6 +118,7 @@ abr --set-default-model sonnet46-h
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
 | `--prune-local-branches` | Delete merged local `agent/*` branches |
+| `--prune-remote-branches` | Delete merged remote `agent/*` branches and stale remote refs |
 | `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `codex` |
 | `--model <name>` | Model short name (see below) |
 | `--new-tmux` | Create a separate tmux session |
@@ -175,6 +179,7 @@ Override the config file location with `ABR_CONFIG` env var.
 ## Branch Maintenance
 
 - Run `abr --prune-local-branches` to clean up merged local `agent/*` branches from older PRs
+- Run `abr --prune-remote-branches` to clean up merged remote `agent/*` branches and stale remote refs
 
 ## Quality Gate & Lint Policy
 

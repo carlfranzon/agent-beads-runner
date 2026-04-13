@@ -30,6 +30,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
 | Delete merged local branches | `abr --prune-local-branches` |
+| Delete merged remote branches | `abr --prune-remote-branches` |
 | Use a different agent | `abr --agent claude` |
 | Use a specific model | `abr --agent copilot --model sonnet-46-h` |
 | Preview without executing | `abr --dry-run` |
@@ -90,6 +91,7 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 ## Branch Maintenance
 
 - Delete merged local `agent/*` branches with `abr --prune-local-branches`
+- Delete merged remote `agent/*` branches (and stale remote refs) with `abr --prune-remote-branches`
 
 ## Graceful Stop (Loop Mode)
 
