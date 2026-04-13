@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.22"
+ABR_VERSION="0.1.23"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1487,12 +1487,19 @@ ${comments_section}
    - **Report baseline debt separately** (informational) — it's not a blocker for bead-scoped work
 
 ### Step 2: Evaluate Against Acceptance Criteria
-Check whether the code in the diff actually satisfies the bead's acceptance criteria (shown above).
+Check whether the code in the diff actually satisfies the acceptance criteria **as written in the bead above**.
+The acceptance criteria are the sole source of truth — prior review comments are informational context only, not new requirements.
+
 Consider:
 - Does the code do what the bead asks for, or is it just a placeholder/stub?
-- Are there bugs, type errors, or logic issues?
-- Does it follow the patterns used elsewhere in the codebase?
-- Are there security issues?
+- Are there **runtime-reachable** bugs, type errors, or logic issues? (Defensive checks for paths that cannot actually throw/fail are NOT blockers)
+- Are there security vulnerabilities with real, exploitable impact?
+
+Do NOT raise as blocking issues:
+- Requirements that are not explicitly stated in the bead's acceptance criteria (e.g., migrations, backfills, refactors not mentioned in the bead)
+- Infrastructure that does not already exist in the codebase (e.g., a central logger, metric counters, distributed tracing) — requiring non-existent infrastructure is out of scope
+- Defensive error handling for code paths that are provably unreachable at runtime
+- General "best practice" improvements or architectural suggestions that go beyond the bead scope
 
 ### Step 3: Render Your Verdict
 Create a file called \`.agent-review.json\` in the repo root with your verdict:
@@ -1519,8 +1526,12 @@ If the PR needs changes:
 ## Rules
 - Be strict on: placeholders, stubs, incomplete implementations, NEW lint errors in changed files
 - Be lenient on: pre-existing baseline lint debt (it's tracked separately)
-- Only reject for: new lint errors, logic issues, acceptance criteria not met, security issues
-- If acceptance criteria are missing or vague, evaluate based on the bead description
+- Only reject for: new lint errors, runtime-reachable logic bugs, explicitly unmet acceptance criteria, security vulnerabilities with real impact
+- "Acceptance criteria not met" means criteria defined in the bead — not prior review comments, not missing features not mentioned in the bead
+- "Logic issues" means bugs that can actually be triggered at runtime — NOT defensive improvements, unreachable paths, or theoretical edge cases
+- Do NOT reject for missing infrastructure (logging abstraction, metrics, monitoring) that does not already exist in the codebase
+- Do NOT add requirements beyond what the bead explicitly asks for
+- If acceptance criteria are missing or vague, evaluate based on the bead description only
 - Do NOT modify any code — you are only reviewing
 - Do NOT merge or close the PR — just write the verdict file
 - Do NOT run git push or modify git state beyond checking out branches
