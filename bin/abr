@@ -18,13 +18,14 @@ set -euo pipefail
 #   abr --review                         # Review all open agent PRs
 #   abr --review --pr 5                  # Review a specific PR
 #   abr --review --parallel-3            # Review PRs in 3 parallel tmux panes
+#   abr --prune-local-branches           # Delete merged local agent/* branches
 #   abr --bead <id>                      # Work a specific bead
 #   abr --agent gemini                   # Use Gemini CLI (default: copilot)
 #   abr --agent copilot --model opus46-h # Use Copilot with Opus 4.6, high effort
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.19"
+ABR_VERSION="0.1.20"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -131,6 +132,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
+| Delete merged local branches | `abr --prune-local-branches` |
 | Use a different agent | `abr --agent claude` |
 | Use a specific model | `abr --agent copilot --model sonnet-46-h` |
 | Preview without executing | `abr --dry-run` |
@@ -186,7 +188,11 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 5. Launches the agent with a structured prompt
 6. Agent implements changes, runs quality gates, commits, and pushes
 7. `abr` creates a PR via `gh`
-8. Worktree is cleaned up
+8. Worktree and local branch are cleaned up
+
+## Branch Maintenance
+
+- Delete merged local `agent/*` branches with `abr --prune-local-branches`
 
 ## Graceful Stop (Loop Mode)
 
@@ -353,6 +359,7 @@ LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
 REVIEW_MODE=false
 DRY_RUN=false
 NEW_TMUX=false
+PRUNE_LOCAL_BRANCHES=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
@@ -374,6 +381,7 @@ while [[ $# -gt 0 ]]; do
         --review)       REVIEW_MODE=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --new-tmux)     NEW_TMUX=true; shift ;;
+        --prune-local-branches) PRUNE_LOCAL_BRANCHES=true; shift ;;
         --bead)         TARGET_BEAD="$2"; shift 2 ;;
         --pr)           TARGET_PR="$2"; shift 2 ;;
         --agent)        AGENT_TOOL="$2"; shift 2 ;;
@@ -404,6 +412,7 @@ Usage:
   abr --review                           Review all open agent PRs
   abr --review --pr 5                    Review a specific PR
   abr --review --parallel-3              Review PRs in 3 parallel tmux panes
+    abr --prune-local-branches             Delete merged local agent/* branches
   abr --agent gemini                     Use Gemini CLI
   abr --agent copilot --model opus46-h   Use Copilot with Opus 4.6, high effort
   abr --install-skill                    Install abr skill for AI agents
@@ -424,6 +433,7 @@ Options:
   --bead <id>           Work on a specific bead instead of auto-picking
   --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
   --pr <number>         With --review: review a specific PR number
+    --prune-local-branches Delete merged local agent/* branches
   --agent <tool>        AI tool: copilot (default), claude, gemini, codex
   --model <name>        Model short name (see table below). Default: per-agent
   --new-tmux            Create a separate tmux session (default: add panes to existing)
@@ -939,6 +949,7 @@ PROMPT
 
 cleanup_worktree() {
     local wt_path="$1"
+    local branch="${2:-}"
     if [[ -d "$wt_path" ]]; then
         log "Cleaning up worktree: $wt_path"
         cd "$REPO_ROOT"
@@ -946,6 +957,54 @@ cleanup_worktree() {
             git worktree remove "$wt_path" --force 2>/dev/null || true
         git worktree prune 2>/dev/null || true
     fi
+
+    if [[ -n "$branch" ]] && git show-ref --verify --quiet "refs/heads/$branch"; then
+        if git branch -d "$branch" &>/dev/null; then
+            log "Deleted local branch: $branch"
+        else
+            log "Keeping local branch (not fully merged): $branch"
+        fi
+    fi
+}
+
+prune_local_branches() {
+    cd "$REPO_ROOT"
+
+    local default_branch current_branch
+    local deleted=0 kept=0
+
+    default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+    [[ -z "$default_branch" ]] && default_branch="main"
+    current_branch=$(git branch --show-current 2>/dev/null || echo "")
+
+    log "Pruning merged local agent branches against origin/${default_branch}..."
+    git fetch origin "$default_branch" --prune 2>/dev/null || true
+
+    local branch
+    while IFS= read -r branch; do
+        [[ -z "$branch" ]] && continue
+
+        if [[ "$branch" == "$current_branch" ]]; then
+            log "Keeping checked-out branch: $branch"
+            kept=$((kept + 1))
+            continue
+        fi
+
+        if git merge-base --is-ancestor "$branch" "origin/$default_branch" 2>/dev/null; then
+            if git branch -d "$branch" &>/dev/null; then
+                log "Deleted local branch: $branch"
+                deleted=$((deleted + 1))
+            else
+                log "Could not delete local branch: $branch"
+                kept=$((kept + 1))
+            fi
+        else
+            log "Keeping unmerged branch: $branch"
+            kept=$((kept + 1))
+        fi
+    done < <(git for-each-ref --format='%(refname:short)' refs/heads/agent)
+
+    log "Prune complete. Deleted: $deleted  Kept: $kept"
 }
 
 # --- Run one bead (worktree → agent → PR → cleanup) --------------------------
@@ -976,7 +1035,7 @@ run_one_bead() {
     copy_env_files "$wt_path"
     install_deps "$wt_path"
 
-    trap "cleanup_worktree '$wt_path'" EXIT
+    trap "cleanup_worktree '$wt_path' '$branch'" EXIT
 
     local prompt
     prompt=$(build_agent_prompt "$bead_id")
@@ -1047,7 +1106,7 @@ run_one_bead() {
     fi
 
     trap - EXIT
-    cleanup_worktree "$wt_path"
+    cleanup_worktree "$wt_path" "$branch"
 
     log "=== Finished bead: $bead_id (exit=$exit_code) ==="
     return $exit_code
@@ -1522,7 +1581,7 @@ for f in files:
     copy_env_files "$wt_path"
     install_deps "$wt_path"
 
-    trap "cleanup_worktree '$wt_path'" EXIT
+    trap "cleanup_worktree '$wt_path' '$branch'" EXIT
 
     # Build and run the review agent
     local prompt
@@ -1570,7 +1629,7 @@ for f in files:
         logr "Review agent did not produce a verdict file for PR #${pr_number}"
         logr "Manual review required."
         trap - EXIT
-        cleanup_worktree "$wt_path"
+        cleanup_worktree "$wt_path" "$branch"
         return 1
     fi
 
@@ -1723,6 +1782,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
                     if [[ $retry_rc -eq 0 ]] && ! echo "$retry_output" | grep -qi "conflict\|not possible\|could not merge\|can't be merged"; then
                         git push origin --delete "$branch" 2>/dev/null || true
+                        cleanup_worktree "$wt_path" "$branch"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
@@ -1737,6 +1797,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
             else
                 # Merge succeeded — clean up remote branch
                 git push origin --delete "$branch" 2>/dev/null || true
+                cleanup_worktree "$wt_path" "$branch"
                 log "PR #${pr_number} merged and branch cleaned up."
             fi
             ;;
@@ -1782,7 +1843,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
     rm -f "$verdict_file"
     trap - EXIT
-    cleanup_worktree "$wt_path"
+    cleanup_worktree "$wt_path" "$branch"
 }
 
 run_review() {
@@ -1910,6 +1971,11 @@ for p in agent_prs:
 
 main() {
     cd "$REPO_ROOT"
+
+    if [[ "$PRUNE_LOCAL_BRANCHES" == "true" ]]; then
+        prune_local_branches
+        return
+    fi
 
     # Verify required tools
     for cmd in bd git python3; do

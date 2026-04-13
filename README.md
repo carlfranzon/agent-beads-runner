@@ -12,7 +12,7 @@ Run `abr` from any beads-enabled git repo to automatically pick a bead, create a
 - **PR review** — Automated code review of agent-created PRs with agent-assisted conflict resolution
 - **Model shortcuts** — Short names for all major models with effort/reasoning control
 - **Graceful stop** — Ctrl+C, stop file, or SIGUSR1 to finish current bead and exit
-- **Auto-cleanup** — Worktrees are created and destroyed automatically
+- **Auto-cleanup** — Worktrees are created and destroyed automatically, and merged local agent branches are deleted
 
 ## Install
 
@@ -89,6 +89,9 @@ abr --review
 # Review a specific PR
 abr --review --pr 5
 
+# Delete merged local agent/* branches
+abr --prune-local-branches
+
 # Preview what would happen
 abr --dry-run
 
@@ -111,6 +114,7 @@ abr --set-default-model sonnet46-h
 | `--bead <id>` | Work on a specific bead |
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
+| `--prune-local-branches` | Delete merged local `agent/*` branches |
 | `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `codex` |
 | `--model <name>` | Model short name (see below) |
 | `--new-tmux` | Create a separate tmux session |
@@ -166,7 +170,11 @@ Override the config file location with `ABR_CONFIG` env var.
 5. Launches the AI agent with a structured prompt
 6. Agent implements the bead, runs quality gates, commits, and pushes
 7. Creates a PR via `gh`
-8. Cleans up the worktree
+8. Cleans up the worktree and local branch
+
+## Branch Maintenance
+
+- Run `abr --prune-local-branches` to clean up merged local `agent/*` branches from older PRs
 
 ## Quality Gate & Lint Policy
 

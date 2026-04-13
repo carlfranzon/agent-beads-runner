@@ -38,6 +38,7 @@ echo "$MODEL_RESOLVED $EFFORT_RESOLVED"
 - **Agent backends**: Each agent (copilot, claude, gemini, codex) has its own case block in `resolve_model_and_effort()` AND in the agent launch sections (`run_one_bead`, `review_one_pr`, conflict resolution). Changes to one must be mirrored to the others.
 - **Linting policy**: Worker agents must fix new lint errors in changed files but may leave pre-existing baseline errors. Review agents approve if no new lint errors in changed files and total count did not increase. This unblocks bead-scoped work while preventing regressions. See `build_agent_prompt()` and `build_review_prompt()` for the lint logic.
 - **Locking**: All `bd` commands that may write go through `bd_locked()` (mkdir-based mutex). Never call `bd` directly for write operations.
+- **Branch hygiene**: Successful review merges should remove remote and local `agent/*` branches. Use `abr --prune-local-branches` to clean up older merged local branches.
 - **Commit messages**: Use conventional commits — `fix:`, `feat:`, `ci:`, `docs:`.
 - **Documentation sync**: When adding or changing features, always update ALL of these in the same commit: `--help` text in `bin/abr`, `README.md`, `AGENTS.md`, and `.github/skills/abr/SKILL.md` (which is the canonical source for the embedded SKILL in `--install-skill` and the symlinked copies in `.agents/` and `.claude/`).
 
