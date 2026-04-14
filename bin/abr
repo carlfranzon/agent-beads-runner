@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.29"
+ABR_VERSION="0.1.30"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1073,7 +1073,8 @@ prune_local_branches() {
         fi
     done < <(git for-each-ref --format='%(refname:short)' refs/heads/agent)
 
-    # Also clean up any leftover pr-review-N local refs (local-only, always safe to force-delete)
+    # Also clean up any leftover pr-* local refs (local-only fetch refs, always safe to force-delete)
+    # Matches: pr-review-N (current naming), and legacy patterns like pr-N, pr-N-head, pr-N-review
     local ref
     while IFS= read -r ref; do
         [[ -z "$ref" ]] && continue
@@ -1081,7 +1082,7 @@ prune_local_branches() {
             log "Deleted PR review ref: $ref"
             deleted=$((deleted + 1))
         fi
-    done < <(git for-each-ref --format='%(refname:short)' 'refs/heads/pr-review-*')
+    done < <(git for-each-ref --format='%(refname:short)' 'refs/heads/pr-*')
 
     log "Prune complete. Deleted: $deleted  Kept: $kept"
 }
@@ -1098,20 +1099,22 @@ prune_remote_branches() {
     log "Refreshing remote refs from origin..."
     git fetch origin --prune 2>/dev/null || true
 
-    local remote_agent_branches
+    local remote_agent_branches remote_pr_branches
     remote_agent_branches=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/agent | sed 's#^origin/##')
+    remote_pr_branches=$(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/pr' | sed 's#^origin/##')
 
-    if [[ -z "$remote_agent_branches" ]]; then
-        log "No remote agent branches found under origin/agent/*."
+    if [[ -z "$remote_agent_branches" && -z "$remote_pr_branches" ]]; then
+        log "No remote agent/* or pr/* branches found on origin."
         return 0
     fi
 
-    log "Pruning merged remote agent branches against origin/${default_branch}..."
+    log "Pruning merged remote agent/* and pr/* branches against origin/${default_branch}..."
     local branch
     while IFS= read -r branch; do
         [[ -z "$branch" ]] && continue
 
-        if git merge-base --is-ancestor "origin/$branch" "origin/$default_branch" 2>/dev/null; then
+        if git merge-base --is-ancestor "origin/$branch" "origin/$default_branch" 2>/dev/null || \
+           ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
             if [[ "$DRY_RUN" == "true" ]]; then
                 log "[DRY RUN] Would delete remote branch: $branch"
                 deleted=$((deleted + 1))
@@ -1126,7 +1129,7 @@ prune_remote_branches() {
             log "Keeping unmerged remote branch: $branch"
             kept=$((kept + 1))
         fi
-    done <<< "$remote_agent_branches"
+    done <<< "$(printf '%s\n' $remote_agent_branches $remote_pr_branches)"
 
     log "Remote prune complete. Deleted: $deleted  Kept: $kept  Failed: $failed"
 }
