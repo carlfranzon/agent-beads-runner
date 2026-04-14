@@ -1082,6 +1082,15 @@ run_one_bead() {
         return 0
     fi
 
+    # Guard: if the worktree already exists another agent beat us here.
+    # This can happen during parallel runs when two agents both successfully
+    # claim the same bead (DB sync lag) and the second reaches run_one_bead
+    # after the first has already created the worktree.
+    if [[ -d "$wt_path" ]]; then
+        logr "Worktree $wt_path already exists — bead $bead_id is being handled by another agent. Aborting session."
+        return 1
+    fi
+
     mkdir -p "$(dirname "$wt_path")"
 
     cd "$REPO_ROOT"
@@ -1219,11 +1228,29 @@ run_loop() {
             break
         fi
 
+        # Pre-flight: check worktree existence BEFORE claiming. This is a
+        # filesystem check (instant, no DB sync lag) and catches the case where
+        # a parallel agent on this machine already claimed+started this bead
+        # but hasn't pushed the DB update yet, so dolt pull still shows it ready.
+        local branch wt_check_path
+        branch=$(sanitize_branch "$bead_id")
+        wt_check_path="${WORKTREE_BASE}/${branch}"
+        if [[ -d "$wt_check_path" ]]; then
+            log "Bead $bead_id worktree already exists (another agent is working on it) — skipping."
+            # Force a fresh sync so next iteration sees updated bead state
+            bd_locked dolt pull 2>/dev/null || true
+            sleep $(( (RANDOM % 4) + 3 ))
+            continue
+        fi
+
         # Claim from main repo BEFORE spawning subprocess so parallel
         # loops see the bead as taken on their next pick_next_bead call.
         if ! claim_bead "$bead_id"; then
-            log "Bead $bead_id already claimed — skipping to next."
-            sleep $(( (RANDOM % 2) + 1 ))
+            log "Bead $bead_id already claimed — syncing and skipping to next."
+            # Extra pull + longer backoff: give the claiming agent time to push
+            # so that our next pick_next_bead no longer sees this bead as ready.
+            bd_locked dolt pull 2>/dev/null || true
+            sleep $(( (RANDOM % 4) + 3 ))
             continue
         fi
 
