@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.28"
+ABR_VERSION="0.1.29"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1072,6 +1072,16 @@ prune_local_branches() {
             kept=$((kept + 1))
         fi
     done < <(git for-each-ref --format='%(refname:short)' refs/heads/agent)
+
+    # Also clean up any leftover pr-review-N local refs (local-only, always safe to force-delete)
+    local ref
+    while IFS= read -r ref; do
+        [[ -z "$ref" ]] && continue
+        if git branch -D "$ref" &>/dev/null; then
+            log "Deleted PR review ref: $ref"
+            deleted=$((deleted + 1))
+        fi
+    done < <(git for-each-ref --format='%(refname:short)' 'refs/heads/pr-review-*')
 
     log "Prune complete. Deleted: $deleted  Kept: $kept"
 }
