@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.26"
+ABR_VERSION="0.1.27"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -676,12 +676,64 @@ claim_bead() {
         if bd_locked update "$bead_id" --claim 2>/dev/null; then
             # Push claim to remote so parallel agents see it
             bd_locked dolt push 2>/dev/null || true
+            # Signal push completion so loop panes know a pull is now useful
+            ipc_signal_pushed
             return 0
         fi
         [[ $attempt -lt $max_attempts ]] && sleep $(( (RANDOM % 3) + 1 ))
     done
     return 1
 }
+
+# --- IPC: filesystem-based inter-agent signalling ----------------------------
+# Zero-dependency pub/sub using the local filesystem. All state lives under
+# ${WORKTREE_BASE}/.abr-ipc/ which is on the same mount as the worktrees so
+# file creation is atomic and visible to every tmux pane instantly.
+#
+# Events:
+#   claimed/<bead_id>   Written by the claiming pane right after bd --claim
+#                       succeeds, BEFORE dolt push finishes. Other panes see
+#                       this and skip the bead even while the push is in-flight.
+#   last_push           Touched after every dolt push. Other panes compare
+#                       their own last_pull_<PID> stamp against this to decide
+#                       whether a pull is actually useful.
+#   last_pull_<PID>     Per-loop-process stamp; updated after each pull.
+
+ipc_signal_claimed() {
+    local dir="${WORKTREE_BASE}/.abr-ipc/claimed"
+    mkdir -p "$dir"
+    echo "$$" > "${dir}/$1"
+}
+
+ipc_is_claimed() { [[ -f "${WORKTREE_BASE}/.abr-ipc/claimed/$1" ]]; }
+
+ipc_clear_claim() { rm -f "${WORKTREE_BASE}/.abr-ipc/claimed/$1"; }
+
+ipc_signal_pushed() {
+    mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+    touch "${WORKTREE_BASE}/.abr-ipc/last_push"
+}
+
+# Returns 0 (pull needed) when:
+#   - this process has never pulled (first iteration), OR
+#   - another agent pushed since our last pull.
+# In solo mode (no last_push file) always pulls so we see remote changes.
+ipc_needs_pull() {
+    local our_stamp="${WORKTREE_BASE}/.abr-ipc/last_pull_$$"
+    local push_stamp="${WORKTREE_BASE}/.abr-ipc/last_push"
+    [[ ! -f "$our_stamp" ]] && return 0                                         # first iteration
+    [[ ! -f "$push_stamp" ]] && return 0                                        # solo mode, no signals
+    [[ "$push_stamp" -nt "$our_stamp" ]] && return 0                            # new push arrived
+    return 1
+}
+
+ipc_record_pull() {
+    mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+    touch "${WORKTREE_BASE}/.abr-ipc/last_pull_$$"
+}
+
+# Remove per-process state when this loop process exits.
+ipc_cleanup_self() { rm -f "${WORKTREE_BASE}/.abr-ipc/last_pull_$$"; }
 
 # --- Package manager detection ------------------------------------------------
 
@@ -1210,8 +1262,12 @@ run_loop() {
             break
         fi
 
-        # Sync beads to see latest state (other agents may have closed beads)
-        bd_locked dolt pull 2>/dev/null || true
+        # Sync beads: pull only when another agent has pushed since we last
+        # pulled. In solo mode (no last_push signal) we always pull.
+        if ipc_needs_pull; then
+            bd_locked dolt pull 2>/dev/null || true
+            ipc_record_pull
+        fi
 
         local bead_id
         bead_id=$(pick_next_bead)
@@ -1228,7 +1284,16 @@ run_loop() {
             break
         fi
 
-        # Pre-flight: check worktree existence BEFORE claiming. This is a
+        # IPC pre-flight: check if a local pane has already broadcasted a claim
+        # for this bead. This fires before the dolt push completes and before
+        # the worktree directory is created, closing the earliest race window.
+        if ipc_is_claimed "$bead_id"; then
+            log "Bead $bead_id already claimed by a local agent (IPC) — skipping."
+            sleep $(( (RANDOM % 3) + 2 ))
+            continue
+        fi
+
+        # Worktree pre-flight: check worktree existence BEFORE claiming. This is a
         # filesystem check (instant, no DB sync lag) and catches the case where
         # a parallel agent on this machine already claimed+started this bead
         # but hasn't pushed the DB update yet, so dolt pull still shows it ready.
@@ -1250,20 +1315,27 @@ run_loop() {
             # Extra pull + longer backoff: give the claiming agent time to push
             # so that our next pick_next_bead no longer sees this bead as ready.
             bd_locked dolt pull 2>/dev/null || true
+            ipc_record_pull
             sleep $(( (RANDOM % 4) + 3 ))
             continue
         fi
+
+        # Broadcast the claim over IPC so other loop panes skip this bead
+        # immediately, without waiting for the dolt push to propagate.
+        ipc_signal_claimed "$bead_id"
 
         # Re-invoke this script as a subprocess — completely fresh session
         local loop_invoke_flags=(--bead "$bead_id" --agent "$AGENT_TOOL")
         [[ -n "$MODEL" ]] && loop_invoke_flags+=(--model "$MODEL")
         "$script_path" "${loop_invoke_flags[@]}" || true
         completed=$((completed + 1))
+        ipc_clear_claim "$bead_id"  # Release IPC claim so other panes know it's done
 
         log "Loop: bead $bead_id session closed ($completed completed). Picking next..."
         sleep 2  # Brief pause between sessions
     done
 
+    ipc_cleanup_self  # Remove per-process pull stamp
     rm -f "$STOP_FILE"
 }
 
