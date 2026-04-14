@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.27"
+ABR_VERSION="0.1.28"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1019,10 +1019,10 @@ cleanup_worktree() {
     fi
 
     if [[ -n "$branch" ]] && git show-ref --verify --quiet "refs/heads/$branch"; then
-        if git branch -d "$branch" &>/dev/null; then
+        if git branch -D "$branch" &>/dev/null; then
             log "Deleted local branch: $branch"
         else
-            log "Keeping local branch (not fully merged): $branch"
+            log "Could not delete local branch: $branch"
         fi
     fi
 
@@ -1043,7 +1043,8 @@ prune_local_branches() {
     current_branch=$(git branch --show-current 2>/dev/null || echo "")
 
     log "Pruning merged local agent branches against origin/${default_branch}..."
-    git fetch origin "$default_branch" --prune 2>/dev/null || true
+    # Fetch all branches and prune stale remote-tracking refs (including origin/agent/*)
+    git fetch origin --prune 2>/dev/null || true
 
     local branch
     while IFS= read -r branch; do
@@ -1055,8 +1056,11 @@ prune_local_branches() {
             continue
         fi
 
-        if git merge-base --is-ancestor "$branch" "origin/$default_branch" 2>/dev/null; then
-            if git branch -d "$branch" &>/dev/null; then
+        # Delete if commits are merged into default branch (fast-forward) OR
+        # remote branch is gone (squash/rebase merge deletes remote but changes SHA)
+        if git merge-base --is-ancestor "$branch" "origin/$default_branch" 2>/dev/null || \
+           ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+            if git branch -D "$branch" &>/dev/null; then
                 log "Deleted local branch: $branch"
                 deleted=$((deleted + 1))
             else
