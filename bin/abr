@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.24"
+ABR_VERSION="0.1.25"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -957,6 +957,7 @@ PROMPT
 cleanup_worktree() {
     local wt_path="$1"
     local branch="${2:-}"
+    local pr_local_ref="${3:-}"
     if [[ -d "$wt_path" ]]; then
         log "Cleaning up worktree: $wt_path"
         cd "$REPO_ROOT"
@@ -971,6 +972,11 @@ cleanup_worktree() {
         else
             log "Keeping local branch (not fully merged): $branch"
         fi
+    fi
+
+    # Clean up any locally-fetched PR review ref (pull/N/head fetched for fork PRs)
+    if [[ -n "$pr_local_ref" ]] && git show-ref --verify --quiet "refs/heads/$pr_local_ref"; then
+        git branch -D "$pr_local_ref" 2>/dev/null && log "Deleted PR review ref: $pr_local_ref" || true
     fi
 }
 
@@ -1637,14 +1643,22 @@ for f in files:
 
     cd "$REPO_ROOT"
     log "Creating review worktree..."
-    git worktree add "$wt_path" "origin/$branch" --detach 2>&1 | while read -r line; do
-        log "  $line"
-    done
+
+    # Prefer origin/<branch> (same-repo PRs); fall back to pull/N/head (fork PRs)
+    local pr_local_ref=""
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        git worktree add "$wt_path" "origin/$branch" --detach 2>&1 | while read -r line; do log "  $line"; done
+    else
+        pr_local_ref="pr-review-${pr_number}"
+        log "  origin/$branch not found; fetching pull/${pr_number}/head as $pr_local_ref..."
+        git fetch origin "pull/${pr_number}/head:${pr_local_ref}" 2>&1 | while read -r line; do log "  $line"; done
+        git worktree add "$wt_path" "$pr_local_ref" --detach 2>&1 | while read -r line; do log "  $line"; done
+    fi
 
     copy_env_files "$wt_path"
     install_deps "$wt_path"
 
-    trap "cleanup_worktree '$wt_path' '$branch'" EXIT
+    trap "cleanup_worktree '$wt_path' '$branch' '$pr_local_ref'" EXIT
 
     # Build and run the review agent
     local prompt
@@ -1692,7 +1706,7 @@ for f in files:
         logr "Review agent did not produce a verdict file for PR #${pr_number}"
         logr "Manual review required."
         trap - EXIT
-        cleanup_worktree "$wt_path" "$branch"
+        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
         return 1
     fi
 
@@ -1869,7 +1883,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
                     if [[ $retry_rc -eq 0 ]] && ! echo "$retry_output" | grep -qi "conflict\|not possible\|could not merge\|can't be merged"; then
                         git push origin --delete "$branch" 2>/dev/null || true
-                        cleanup_worktree "$wt_path" "$branch"
+                        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
@@ -1884,7 +1898,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
             else
                 # Merge succeeded — clean up remote branch
                 git push origin --delete "$branch" 2>/dev/null || true
-                cleanup_worktree "$wt_path" "$branch"
+                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                 log "PR #${pr_number} merged and branch cleaned up."
             fi
             ;;
@@ -1954,7 +1968,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
     rm -f "$verdict_file"
     trap - EXIT
-    cleanup_worktree "$wt_path" "$branch"
+    cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
 }
 
 run_review() {
