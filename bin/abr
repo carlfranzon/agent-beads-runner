@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.31"
+ABR_VERSION="0.1.32"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -366,6 +366,7 @@ PRUNE_LOCAL_BRANCHES=false
 PRUNE_REMOTE_BRANCHES=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
+REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
@@ -1678,6 +1679,90 @@ If the PR needs changes:
 PROMPT
 }
 
+# --- Review summary printer ---------------------------------------------------
+print_review_summary() {
+    local summary_file="$1"
+    [[ -f "$summary_file" ]] && [[ -s "$summary_file" ]] || return 0
+
+    local total=0 n_approved=0 n_rejected=0 n_conflict=0
+    local approved_items=() rejected_items=() conflict_items=() followup_items=()
+
+    while IFS='|' read -r verdict pr_num bead pr_ttl followup; do
+        total=$((total + 1))
+        case "$verdict" in
+            APPROVED)
+                n_approved=$((n_approved + 1))
+                approved_items+=("PR #${pr_num}  (${bead})  ${pr_ttl}")
+                ;;
+            REJECTED)
+                n_rejected=$((n_rejected + 1))
+                rejected_items+=("PR #${pr_num}  (${bead})  ${pr_ttl}")
+                [[ -n "$followup" ]] && followup_items+=("${followup}  (for PR #${pr_num} / ${bead})")
+                ;;
+            CONFLICT)
+                n_conflict=$((n_conflict + 1))
+                conflict_items+=("PR #${pr_num}  (${bead})  ${pr_ttl}")
+                ;;
+            ERROR)
+                n_rejected=$((n_rejected + 1))
+                rejected_items+=("PR #${pr_num}  (${bead})  ${pr_ttl}  [parse error]")
+                [[ -n "$followup" ]] && followup_items+=("${followup}  (for PR #${pr_num} / ${bead})")
+                ;;
+            NO_VERDICT)
+                n_rejected=$((n_rejected + 1))
+                rejected_items+=("PR #${pr_num}  (${bead})  ${pr_ttl}  [no verdict]")
+                ;;
+        esac
+    done < "$summary_file"
+
+    local divider="────────────────────────────────────────────────────"
+    echo ""
+    echo "┌${divider}┐"
+    echo "│                  Review Run Summary                    │"
+    echo "├${divider}┤"
+    printf "│  PRs reviewed : %-36s│\n" "$total"
+    printf "│  Approved     : %-36s│\n" "$n_approved"
+    printf "│  Rejected     : %-36s│\n" "$n_rejected"
+    if [[ $n_conflict -gt 0 ]]; then
+        printf "│  Conflicts    : %-36s│\n" "$n_conflict  (action required)"
+    fi
+    echo "└${divider}┘"
+
+    if [[ ${#approved_items[@]} -gt 0 ]]; then
+        echo ""
+        echo "  Approved (${n_approved}):"
+        for item in "${approved_items[@]}"; do
+            echo "    [+] $item"
+        done
+    fi
+
+    if [[ ${#rejected_items[@]} -gt 0 ]]; then
+        echo ""
+        echo "  Rejected (${n_rejected}):"
+        for item in "${rejected_items[@]}"; do
+            echo "    [-] $item"
+        done
+    fi
+
+    if [[ ${#conflict_items[@]} -gt 0 ]]; then
+        echo ""
+        echo "  Approved but unresolved conflicts (${n_conflict}) — action required:"
+        for item in "${conflict_items[@]}"; do
+            echo "    [!] $item"
+        done
+    fi
+
+    if [[ ${#followup_items[@]} -gt 0 ]]; then
+        echo ""
+        echo "  Follow-up beads created (${#followup_items[@]}):"
+        for item in "${followup_items[@]}"; do
+            echo "    [>] $item"
+        done
+    fi
+
+    echo ""
+}
+
 # --- Review runner (review open agent PRs) ------------------------------------
 
 extract_bead_id_from_pr() {
@@ -1731,6 +1816,10 @@ review_one_pr() {
     local bead_id
     bead_id=$(extract_bead_id_from_pr "$pr_json")
     log "PR #${pr_number}: branch=$branch  bead=$bead_id"
+
+    # Extract PR title for summary reporting (sanitize | so it doesn't break the summary file)
+    local pr_title
+    pr_title=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'].replace('|',''))" 2>/dev/null || echo "PR #${pr_number}")
 
     # Get bead details
     local bead_info
@@ -1839,6 +1928,7 @@ for f in files:
     if [[ ! -f "$verdict_file" ]]; then
         logr "Review agent did not produce a verdict file for PR #${pr_number}"
         logr "Manual review required."
+        [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "NO_VERDICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
         trap - EXIT
         cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
         return 1
@@ -2019,21 +2109,25 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         git push origin --delete "$branch" 2>/dev/null || true
                         cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
+                        [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
                         logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
                         bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
+                        [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "CONFLICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
                     fi
                 else
                     logr "PR #${pr_number} APPROVED but has merge conflicts that the agent could not resolve."
                     logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
                     bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
+                    [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "CONFLICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
                 fi
             else
                 # Merge succeeded — clean up remote branch
                 git push origin --delete "$branch" 2>/dev/null || true
                 cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                 log "PR #${pr_number} merged and branch cleaned up."
+                [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
             fi
             ;;
 
@@ -2055,15 +2149,19 @@ for i, issue in enumerate(data.get('issues', []), 1):
             bd_locked update "$bead_id" --status open --notes "PR #${pr_number} rejected by review agent: ${summary}" 2>/dev/null || true
 
             # Create a follow-up bead with the specific fixes needed
+            local followup_id=""
             if [[ -n "$issues" ]]; then
                 local fix_desc="Fix issues from PR #${pr_number} review for ${bead_id}:\n${issues}"
-                bd_locked create --title "Fix review issues for ${bead_id}" \
+                local create_out
+                create_out=$(bd_locked create --title "Fix review issues for ${bead_id}" \
                     --description "$(printf '%b' "$fix_desc")" \
                     --parent "$bead_id" \
-                    --priority 1 \
-                    2>&1 | while read -r line; do log "  $line"; done
-                log "Created follow-up bead for fixes."
+                    --priority 1 2>&1)
+                while read -r line; do log "  $line"; done <<< "$create_out"
+                followup_id=$(echo "$create_out" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
+                log "Created follow-up bead for fixes.${followup_id:+ ($followup_id)}"
             fi
+            [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "REJECTED|${pr_number}|${bead_id}|${pr_title}|${followup_id}" >> "$REVIEW_SUMMARY_FILE"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review. See review comment for details." \
@@ -2086,12 +2184,16 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
             # Create a follow-up bead to investigate and fix
             local unknown_fix_desc="PR #${pr_number} for ${bead_id} was closed because the review agent produced an unrecognized verdict.\nRaw verdict file:\n${raw_verdict}\n\nInvestigate the issue and re-run the agent or fix manually."
-            bd_locked create --title "Fix review parse failure for ${bead_id}" \
+            local create_out_unk
+            create_out_unk=$(bd_locked create --title "Fix review parse failure for ${bead_id}" \
                 --description "$(printf '%b' "$unknown_fix_desc")" \
                 --parent "$bead_id" \
-                --priority 1 \
-                2>&1 | while read -r line; do log "  $line"; done
-            log "Created follow-up bead for rework."
+                --priority 1 2>&1)
+            while read -r line; do log "  $line"; done <<< "$create_out_unk"
+            local followup_id_unk
+            followup_id_unk=$(echo "$create_out_unk" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
+            log "Created follow-up bead for rework.${followup_id_unk:+ ($followup_id_unk)}"
+            [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "ERROR|${pr_number}|${bead_id}|${pr_title}|${followup_id_unk}" >> "$REVIEW_SUMMARY_FILE"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review (unreadable verdict). See review comment for raw output." \
@@ -2115,7 +2217,11 @@ run_review() {
 
     if [[ -n "$TARGET_PR" ]]; then
         # Review a specific PR
+        REVIEW_SUMMARY_FILE=$(mktemp)
         review_one_pr "$TARGET_PR"
+        print_review_summary "$REVIEW_SUMMARY_FILE"
+        rm -f "$REVIEW_SUMMARY_FILE"
+        REVIEW_SUMMARY_FILE=""
         return
     fi
 
@@ -2216,12 +2322,17 @@ for p in agent_prs:
     fi
 
     # Review each PR sequentially
+    REVIEW_SUMMARY_FILE=$(mktemp)
     while read -r pr_line; do
         local pr_num
         pr_num=$(echo "$pr_line" | awk '{print $1}')
         review_one_pr "$pr_num" || true
         sleep 2  # Brief pause between reviews
     done <<< "$agent_prs"
+
+    print_review_summary "$REVIEW_SUMMARY_FILE"
+    rm -f "$REVIEW_SUMMARY_FILE"
+    REVIEW_SUMMARY_FILE=""
 
     log "=== Review complete ==="
 }
