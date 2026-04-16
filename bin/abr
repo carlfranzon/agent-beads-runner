@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.34"
+ABR_VERSION="0.1.35"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -368,6 +368,7 @@ TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
 REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
 INTERNAL_ORCHESTRATOR=""  # Non-empty = run_orchestrator mode; value = num_workers
+INTERNAL_CC=""           # Non-empty = run_cc (command & control) mode; value = num_workers
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
@@ -395,6 +396,7 @@ while [[ $# -gt 0 ]]; do
         --install-skill) shift ;;  # already handled above
         --model)        MODEL="$2"; shift 2 ;;
         --internal-orchestrator) INTERNAL_ORCHESTRATOR="$2"; shift 2 ;;
+        --internal-cc) INTERNAL_CC="$2"; shift 2 ;;
         --parallel-[0-9]*)
             PARALLEL="${1#--parallel-}"
             if [[ "$PARALLEL" -lt 1 ]]; then
@@ -628,6 +630,15 @@ should_stop() {
         request_stop
         return 0
     fi
+    # Check per-agent stop file (written by C&C "stop --target A<n>")
+    if [[ -n "${ABR_AGENT_IDX:-}" ]]; then
+        local per_agent_stop="${WORKTREE_BASE}/.abr-ipc/stop-A${ABR_AGENT_IDX}"
+        if [[ -f "$per_agent_stop" ]]; then
+            rm -f "$per_agent_stop"
+            request_stop
+            return 0
+        fi
+    fi
     return 1
 }
 
@@ -758,6 +769,15 @@ ipc_event() {
 run_orchestrator() {
     local num_workers="${1:-1}"
     local log="${WORKTREE_BASE}/.abr-ipc/events.log"
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
+
+    # Split a 4-line C&C prompt pane below this orchestrator pane.
+    # TMUX_PANE is set automatically by tmux in each pane's shell environment.
+    if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
+        tmux split-window -v -l 4 -t "${TMUX_PANE}" \
+            "cd '${REPO_ROOT}' && '${script_path}' --internal-cc ${num_workers}; printf '\033[90m[C&C closed]\033[0m\n'; read -r _"
+    fi
 
     printf '\e[1;36m╔══════════════════════════════════════════╗\e[0m\n'
     printf '\e[1;36m║      ABR Orchestrator  ·  %d worker(s)      \e[0m\e[1;36m║\e[0m\n' "$num_workers"
@@ -826,6 +846,223 @@ run_orchestrator() {
     printf '\e[1;36m═════════════════════════════════════════\e[0m\n'
     printf '\e[90mAll workers done. Press Enter to close.\e[0m\n'
     read -r
+}
+
+# --- Command & Control prompt -------------------------------------------------
+# Launched in the 4-line bottom slice of the orchestrator pane via
+# --internal-cc <num_workers>.  Presents an interactive abr> prompt that
+# can target, stop, kill, or hot-swap individual worker panes.
+
+run_cc() {
+    local num_workers="${1:-1}"
+    local ipc_dir="${WORKTREE_BASE}/.abr-ipc"
+    local log="${ipc_dir}/events.log"
+
+    # Wait briefly for the event log to exist (orchestrator creates it)
+    local w=0
+    while [[ ! -f "$log" ]] && [[ $w -lt 20 ]]; do sleep 0.5; w=$((w+1)); done
+
+    printf '\e[90m─── C&C ready · type \e[0mhelp\e[90m for commands ──────────\e[0m\n'
+    while true; do
+        printf '\e[1;36mabr>\e[0m '
+        IFS= read -r cmdline || break
+        [[ -z "$cmdline" ]] && continue
+        local -a words
+        read -ra words <<< "$cmdline"
+        local cmd="${words[0]}"
+        case "$cmd" in
+            run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" ;;
+            stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" ;;
+            kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" ;;
+            status)   cc_cmd_status "$ipc_dir" "$log" "$num_workers" ;;
+            help|"?") cc_cmd_help "$log" ;;
+            exit|quit) break ;;
+            *) printf '\e[33mUnknown command: %s  (type help)\e[0m\n' "$cmd" ;;
+        esac
+    done
+    printf '\e[90m[C&C closed]\e[0m\n'
+}
+
+# Resolve a logical alias (A1, A2…) to a tmux pane ID (%N).
+# Prints the pane ID to stdout; prints an error message and returns 1 on failure.
+cc_resolve_target() {
+    local target="$1"
+    local ipc_dir="$2"
+    if [[ ! "$target" =~ ^A[0-9]+$ ]]; then
+        printf '\e[31mInvalid target "%s" — use A1, A2, etc.\e[0m\n' "$target"
+        return 1
+    fi
+    local pane_file="${ipc_dir}/pane-${target}"
+    if [[ ! -f "$pane_file" ]]; then
+        printf '\e[31mTarget %s not registered (worker may not have started yet)\e[0m\n' "$target"
+        return 1
+    fi
+    local pane_id
+    pane_id=$(<"$pane_file")
+    if [[ -z "$pane_id" ]]; then
+        printf '\e[31mTarget %s has an empty pane ID\e[0m\n' "$target"
+        return 1
+    fi
+    echo "$pane_id"
+}
+
+# Extract the value following --flag from a positional argument list.
+# Usage: cc_flag "--flag" "$@"   (returns non-zero when flag is absent)
+cc_flag() {
+    local flag="$1"; shift
+    local found=false
+    for arg; do
+        [[ "$found" == "true" ]] && { echo "$arg"; return 0; }
+        [[ "$arg" == "$flag" ]] && found=true
+    done
+    return 1
+}
+
+# run --target A1 [--agent AGENT] [--model MODEL] [extra abr flags…]
+# Hot-swaps the agent in the target pane via tmux respawn-pane -k.
+# Defaults to --loop; pass --loop-N or --bead to override.
+cc_cmd_run() {
+    local ipc_dir="$1" log="$2" num_workers="$3"
+    shift 3
+    local target="" model="" agent=""
+    target=$(cc_flag "--target" "$@") || true
+    model=$(cc_flag  "--model"  "$@") || true
+    agent=$(cc_flag  "--agent"  "$@") || true
+
+    # Collect extra flags (anything that is not --target/--model/--agent or their values)
+    local extra_flags=() skip_next=false
+    for arg; do
+        if [[ "$skip_next" == "true" ]]; then skip_next=false; continue; fi
+        case "$arg" in
+            --target|--model|--agent) skip_next=true ;;
+            *) extra_flags+=("$arg") ;;
+        esac
+    done
+
+    if [[ -z "$target" ]]; then
+        printf '\e[31mrun: --target required  (e.g. run --target A1 --model gpt5m-h)\e[0m\n'
+        return 1
+    fi
+    local pane_id
+    pane_id=$(cc_resolve_target "$target" "$ipc_dir") || return 1
+    local idx="${target#A}"
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
+
+    local flags="--loop"
+    [[ -n "$agent" ]] && flags+=" --agent $agent"
+    [[ -n "$model" ]] && flags+=" --model $model"
+    [[ ${#extra_flags[@]} -gt 0 ]] && flags+=" ${extra_flags[*]}"
+
+    # Clear any stale per-agent stop file so the new worker starts cleanly
+    rm -f "${ipc_dir}/stop-A${idx}"
+
+    # $TMUX_PANE is evaluated by the shell in the new pane (deferred via \$)
+    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
+    if tmux respawn-pane -k -t "$pane_id" "$new_cmd" 2>/dev/null; then
+        printf '%s|0|INFO|C&C: respawned %s (%s)  →  abr %s\n' \
+            "$(date +%H:%M:%S)" "$target" "$pane_id" "$flags" >> "$log"
+        printf '\e[32mRespawned %s (%s) with: abr %s\e[0m\n' "$target" "$pane_id" "$flags"
+    else
+        printf '\e[31mFailed to respawn %s (%s) — pane may no longer exist\e[0m\n' "$target" "$pane_id"
+    fi
+}
+
+# stop --target A2
+# Writes a per-agent stop file and sends C-c so the worker exits gracefully
+# after finishing its current bead.  should_stop() checks this file each loop.
+cc_cmd_stop() {
+    local ipc_dir="$1" log="$2"
+    shift 2
+    local target
+    target=$(cc_flag "--target" "$@") || true
+    if [[ -z "$target" ]]; then
+        printf '\e[31mstop: --target required  (e.g. stop --target A2)\e[0m\n'
+        return 1
+    fi
+    local pane_id
+    pane_id=$(cc_resolve_target "$target" "$ipc_dir") || return 1
+    local idx="${target#A}"
+
+    # Per-agent stop file — checked by should_stop() in the worker loop
+    touch "${ipc_dir}/stop-A${idx}"
+    # C-c wakes a blocking agent/read call so the stop file is seen sooner
+    tmux send-keys -t "$pane_id" C-c 2>/dev/null || true
+
+    printf '%s|0|INFO|C&C: graceful stop → %s (%s)\n' \
+        "$(date +%H:%M:%S)" "$target" "$pane_id" >> "$log"
+    printf '\e[33mGraceful stop sent to %s (%s) — worker exits after current bead\e[0m\n' "$target" "$pane_id"
+}
+
+# kill --target A3
+# Hard-kills the pane process via respawn-pane -k, then installs a read
+# placeholder so the window layout grid is preserved.
+cc_cmd_kill() {
+    local ipc_dir="$1" log="$2"
+    shift 2
+    local target
+    target=$(cc_flag "--target" "$@") || true
+    if [[ -z "$target" ]]; then
+        printf '\e[31mkill: --target required  (e.g. kill --target A3)\e[0m\n'
+        return 1
+    fi
+    local pane_id
+    pane_id=$(cc_resolve_target "$target" "$ipc_dir") || return 1
+
+    # respawn-pane -k hard-kills and replaces with a placeholder — layout intact
+    local placeholder="printf '\033[31m[${target} killed by C&C]\033[0m\n'; printf '\033[90mRun: run --target ${target} to respawn an agent here\033[0m\n'; read -r _"
+    if tmux respawn-pane -k -t "$pane_id" "$placeholder" 2>/dev/null; then
+        printf '%s|0|INFO|C&C: hard-killed %s (%s)\n' \
+            "$(date +%H:%M:%S)" "$target" "$pane_id" >> "$log"
+        printf '\e[31mHard-killed %s (%s) — layout preserved\e[0m\n' "$target" "$pane_id"
+    else
+        printf '\e[31mFailed to kill %s (%s) — pane may not exist\e[0m\n' "$target" "$pane_id"
+    fi
+}
+
+# help
+# Writes a formatted help table to the event log so it appears in the dashboard.
+cc_cmd_help() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+    {
+        printf '%s|0|INFO|─────────────── C&C Commands ───────────────────\n' "$ts"
+        printf '%s|0|INFO|  run  --target A1 [--agent X] [--model Y]  Respawn agent in pane\n' "$ts"
+        printf '%s|0|INFO|         Extra abr flags (e.g. --loop-5) are forwarded.\n' "$ts"
+        printf '%s|0|INFO|  stop  --target A2     Graceful stop (finishes current bead)\n' "$ts"
+        printf '%s|0|INFO|  kill  --target A3     Hard-kill pane (layout preserved)\n' "$ts"
+        printf '%s|0|INFO|  status                Show pane→ID map and liveness\n' "$ts"
+        printf '%s|0|INFO|  help                  Print this message in the dashboard\n' "$ts"
+        printf '%s|0|INFO|  exit / quit           Close this C&C prompt\n' "$ts"
+        printf '%s|0|INFO|────────────────────────────────────────────────\n' "$ts"
+    } >> "$log"
+    printf '\e[90m(Help text sent to dashboard above)\e[0m\n'
+}
+
+# status
+# Writes a pane map and liveness table to the event log.
+cc_cmd_status() {
+    local ipc_dir="$1" log="$2" num_workers="$3"
+    local ts; ts=$(date +%H:%M:%S)
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    printf '%s|0|INFO|──────────── Pane Status ─────────────\n' "$ts" >> "$log"
+    for (( i=1; i<=num_workers; i++ )); do
+        local pane_file="${ipc_dir}/pane-A${i}"
+        if [[ -f "$pane_file" ]]; then
+            local pane_id; pane_id=$(<"$pane_file")
+            local alive="dead"
+            if [[ -n "$session" ]] && \
+               tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | grep -qxF "$pane_id"; then
+                alive="alive"
+            fi
+            printf '%s|0|INFO|  A%d → %s  [%s]\n' "$ts" "$i" "$pane_id" "$alive" >> "$log"
+        else
+            printf '%s|0|INFO|  A%d → (not registered yet)\n' "$ts" "$i" >> "$log"
+        fi
+    done
+    printf '%s|0|INFO|──────────────────────────────────────\n' "$ts" >> "$log"
+    printf '\e[90m(Status sent to dashboard)\e[0m\n'
 }
 
 # --- Package manager detection ------------------------------------------------
@@ -1539,7 +1776,7 @@ launch_tmux() {
         local loop_flag="--loop"
         [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
         for (( i=0; i<PARALLEL; i++ )); do
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' $loop_flag $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' $loop_flag $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
         done
     else
         # Non-loop: pre-assign one bead per pane
@@ -1562,7 +1799,7 @@ launch_tmux() {
 
         for (( i=0; i<total; i++ )); do
             local bead="${beads_to_run[$i]}"
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
         done
     fi
 
@@ -2419,7 +2656,7 @@ for p in agent_prs:
         # Build the worker pane commands
         local pane_cmds=()
         for (( i=0; i<total; i++ )); do
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
         done
 
         if [[ "$session_exists" == "true" ]]; then
@@ -2502,6 +2739,12 @@ main() {
     # Orchestrator mode: render event dashboard, skip all bd/git checks
     if [[ -n "${INTERNAL_ORCHESTRATOR:-}" ]]; then
         run_orchestrator "$INTERNAL_ORCHESTRATOR"
+        return
+    fi
+
+    # C&C mode: run the interactive command prompt, skip all bd/git checks
+    if [[ -n "${INTERNAL_CC:-}" ]]; then
+        run_cc "$INTERNAL_CC"
         return
     fi
 
