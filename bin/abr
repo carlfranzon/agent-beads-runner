@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.33"
+ABR_VERSION="0.1.34"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -367,6 +367,7 @@ PRUNE_REMOTE_BRANCHES=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
 REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
+INTERNAL_ORCHESTRATOR=""  # Non-empty = run_orchestrator mode; value = num_workers
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
@@ -393,6 +394,7 @@ while [[ $# -gt 0 ]]; do
         --agent)        AGENT_TOOL="$2"; shift 2 ;;
         --install-skill) shift ;;  # already handled above
         --model)        MODEL="$2"; shift 2 ;;
+        --internal-orchestrator) INTERNAL_ORCHESTRATOR="$2"; shift 2 ;;
         --parallel-[0-9]*)
             PARALLEL="${1#--parallel-}"
             if [[ "$PARALLEL" -lt 1 ]]; then
@@ -735,6 +737,96 @@ ipc_record_pull() {
 
 # Remove per-process state when this loop process exits.
 ipc_cleanup_self() { rm -f "${WORKTREE_BASE}/.abr-ipc/last_pull_$$"; }
+
+# Append a structured event to the shared orchestrator event log.
+# Format: HH:MM:SS|AGENT_IDX|LEVEL|message
+# No-op when no orchestrator session is active (log file not present).
+# ABR_AGENT_IDX is set via env var when each worker pane is launched.
+ipc_event() {
+    local level="$1"
+    local message="$2"
+    local log="${WORKTREE_BASE}/.abr-ipc/events.log"
+    [[ -f "$log" ]] || return 0
+    printf '%s|%s|%s|%s\n' "$(date +%H:%M:%S)" "${ABR_AGENT_IDX:-?}" "$level" "$message" >> "$log"
+}
+
+# --- Orchestrator dashboard ---------------------------------------------------
+# Launched in the center pane via --internal-orchestrator <num_workers>.
+# Reads the shared event log and renders a live, colour-coded summary until
+# all worker panes have sent an EXIT event, then prints a final tallly.
+
+run_orchestrator() {
+    local num_workers="${1:-1}"
+    local log="${WORKTREE_BASE}/.abr-ipc/events.log"
+
+    printf '\e[1;36m╔══════════════════════════════════════════╗\e[0m\n'
+    printf '\e[1;36m║      ABR Orchestrator  ·  %d worker(s)      \e[0m\e[1;36m║\e[0m\n' "$num_workers"
+    printf '\e[1;36m╚══════════════════════════════════════════╝\e[0m\n'
+    printf '\e[90mWaiting for agents to start…\e[0m\n\n'
+
+    # Wait up to 30s for the event log to appear (workers may not have started yet)
+    local waited=0
+    while [[ ! -f "$log" ]] && [[ $waited -lt 60 ]]; do
+        sleep 0.5; waited=$((waited + 1))
+    done
+    if [[ ! -f "$log" ]]; then
+        printf '\e[31mEvent log never appeared after 30s. Exiting orchestrator.\e[0m\n'
+        return 1
+    fi
+
+    local exit_count=0 claim_count=0 done_count=0 error_count=0 pr_count=0
+
+    # Use a FIFO so we can break cleanly from the read loop (subshell-free)
+    local orch_fifo
+    orch_fifo=$(mktemp -u /tmp/abr-orch-XXXXXX)
+    mkfifo "$orch_fifo"
+    tail -n +1 -f "$log" 2>/dev/null > "$orch_fifo" &
+    local tail_pid=$!
+
+    while IFS='|' read -r ts idx level msg; do
+        level="${level// /}"          # strip any stray whitespace
+        msg="${msg%$'\r'}"            # strip carriage returns
+        local label
+        label="$(printf '\e[90m[%s A%s]\e[0m' "$ts" "$idx")"
+        case "$level" in
+            CLAIM)
+                (( claim_count++ )) || true
+                printf '%s \e[33mCLAIM \e[0m %s\n' "$label" "$msg" ;;
+            START)
+                printf '%s \e[34mSTART \e[0m %s\n' "$label" "$msg" ;;
+            PR)
+                (( pr_count++ )) || true
+                printf '%s \e[32mPR    \e[0m %s\n' "$label" "$msg" ;;
+            DONE)
+                (( done_count++ )) || true
+                printf '%s \e[32mDONE  \e[0m %s\n' "$label" "$msg" ;;
+            ERROR)
+                (( error_count++ )) || true
+                printf '%s \e[31mERROR \e[0m %s\n' "$label" "$msg" ;;
+            EXIT)
+                printf '%s \e[90mEXIT  \e[0m %s\n' "$label" "$msg"
+                (( exit_count++ )) || true
+                [[ $exit_count -ge $num_workers ]] && break ;;
+            INFO)
+                printf '%s \e[90mINFO  \e[0m %s\n' "$label" "$msg" ;;
+            *)
+                printf '%s \e[90m%-5s \e[0m %s\n' "$label" "$level" "$msg" ;;
+        esac
+    done < "$orch_fifo"
+
+    kill "$tail_pid" 2>/dev/null || true
+    rm -f "$orch_fifo"
+
+    printf '\n\e[1;36m════════════ Session Summary ════════════\e[0m\n'
+    printf '  Beads claimed:   %d\n' "$claim_count"
+    printf '  Beads finished:  %d\n' "$done_count"
+    printf '  PRs created:     %d\n' "$pr_count"
+    [[ $error_count -gt 0 ]] && printf '\e[31m  Errors:          %d\e[0m\n' "$error_count" \
+                              || printf '  Errors:          0\n'
+    printf '\e[1;36m═════════════════════════════════════════\e[0m\n'
+    printf '\e[90mAll workers done. Press Enter to close.\e[0m\n'
+    read -r
+}
 
 # --- Package manager detection ------------------------------------------------
 
@@ -1151,6 +1243,7 @@ run_one_bead() {
 
     log "=== Starting agent for bead: $bead_id ==="
     log "Branch: $branch | Worktree: $wt_path"
+    ipc_event "CLAIM" "Bead $bead_id claimed"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY RUN] Would create worktree and launch $AGENT_TOOL for $bead_id"
@@ -1183,6 +1276,7 @@ run_one_bead() {
     prompt=$(build_agent_prompt "$bead_id")
 
     log "Launching $AGENT_TOOL agent..."
+    ipc_event "START" "Launching $AGENT_TOOL for bead $bead_id"
 
     # Resolve model and effort from --model flag
     resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
@@ -1240,6 +1334,7 @@ run_one_bead() {
                     log "  $line"
                 done
             log "PR created."
+            ipc_event "PR" "PR created for bead $bead_id"
         else
             log "No upstream — agent may not have pushed. Skipping PR."
         fi
@@ -1250,6 +1345,11 @@ run_one_bead() {
     trap - EXIT
     cleanup_worktree "$wt_path" "$branch"
 
+    if [[ $exit_code -eq 0 ]]; then
+        ipc_event "DONE" "Bead $bead_id finished"
+    else
+        ipc_event "ERROR" "Bead $bead_id failed (exit=$exit_code)"
+    fi
     log "=== Finished bead: $bead_id (exit=$exit_code) ==="
     return $exit_code
 }
@@ -1358,6 +1458,7 @@ run_loop() {
         sleep 2  # Brief pause between sessions
     done
 
+    ipc_event "EXIT" "Worker loop done ($completed bead(s) completed)"
     ipc_cleanup_self  # Remove per-process pull stamp
     rm -f "$STOP_FILE"
 }
@@ -1394,7 +1495,7 @@ launch_tmux() {
         elif [[ "$session_exists" == "yes" && "$NEW_TMUX" == "true" ]]; then
             log "[DRY RUN] Would create a new tmux session (existing '$TMUX_SESSION' kept) with $PARALLEL pane(s)"
         else
-            log "[DRY RUN] Would create tmux session '$TMUX_SESSION' with $PARALLEL pane(s)"
+            log "[DRY RUN] Would create tmux session '$TMUX_SESSION' with $PARALLEL pane(s) + orchestrator"
         fi
         log "[DRY RUN] Each pane runs: abr $pane_flags"
         if [[ "$LOOP_MODE" == "true" ]]; then
@@ -1424,38 +1525,22 @@ launch_tmux() {
         session_exists=false
     fi
 
-    # Helper to build the command for a pane
-    pane_cmd() {
-        local flags="$1"
-        echo "cd '$REPO_ROOT' && '$script_path' $flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read"
+    # Helper: build the shell command for a worker pane.
+    # ABR_AGENT_IDX is set so workers can tag orchestrator events.
+    worker_pane_cmd() {
+        local idx="$1"
+        local flags="$2"
+        echo "ABR_AGENT_IDX=$idx cd '$REPO_ROOT' && '$script_path' $flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read"
     }
 
+    # Build the array of worker commands
+    local pane_cmds=()
     if [[ "$LOOP_MODE" == "true" ]]; then
-        # Loop mode: each pane self-loops, no need to pre-assign beads
-        if [[ "$session_exists" == "true" ]]; then
-            log "Adding $PARALLEL looping pane(s) to existing tmux session '$TMUX_SESSION'..."
-            local loop_flag="--loop"
-            [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
-            for (( i=0; i<PARALLEL; i++ )); do
-                tmux split-window -t "$TMUX_SESSION" \
-                    "sleep $((i * 5)) && $(pane_cmd "$loop_flag $agent_model_flags")"
-                tmux select-layout -t "$TMUX_SESSION" tiled
-            done
-        else
-            local loop_flag="--loop"
-            [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
-            log "Creating tmux session '$TMUX_SESSION' with $PARALLEL looping pane(s)..."
-            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 \
-                "$(pane_cmd "$loop_flag $agent_model_flags")"
-            tmux rename-window -t "$TMUX_SESSION" "agents"
-
-            for (( i=1; i<PARALLEL; i++ )); do
-                # Stagger start so agents don't race on the same bead
-                tmux split-window -t "$TMUX_SESSION" \
-                    "sleep $((i * 3)) && $(pane_cmd "$loop_flag $agent_model_flags")"
-                tmux select-layout -t "$TMUX_SESSION" tiled
-            done
-        fi
+        local loop_flag="--loop"
+        [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
+        for (( i=0; i<PARALLEL; i++ )); do
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' $loop_flag $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+        done
     else
         # Non-loop: pre-assign one bead per pane
         local beads_to_run=()
@@ -1475,34 +1560,83 @@ launch_tmux() {
         local total=${#beads_to_run[@]}
         [[ $total -gt $PARALLEL ]] && total=$PARALLEL
 
-        if [[ "$session_exists" == "true" ]]; then
-            log "Adding $total pane(s) to existing tmux session '$TMUX_SESSION'..."
-            for (( i=0; i<total; i++ )); do
-                local bead="${beads_to_run[$i]}"
-                tmux split-window -t "$TMUX_SESSION" \
-                    "sleep $((i * 5)) && $(pane_cmd "--bead '$bead' $agent_model_flags")"
-                tmux select-layout -t "$TMUX_SESSION" tiled
-            done
-        else
-            log "Creating tmux session '$TMUX_SESSION' with $total pane(s)..."
-            local first_bead="${beads_to_run[0]}"
-            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 \
-                "$(pane_cmd "--bead '$first_bead' $agent_model_flags")"
-            tmux rename-window -t "$TMUX_SESSION" "agents"
-
-            for (( i=1; i<total; i++ )); do
-                local bead="${beads_to_run[$i]}"
-                tmux split-window -t "$TMUX_SESSION" \
-                    "sleep $((i * 5)) && $(pane_cmd "--bead '$bead' $agent_model_flags")"
-                tmux select-layout -t "$TMUX_SESSION" tiled
-            done
-        fi
+        for (( i=0; i<total; i++ )); do
+            local bead="${beads_to_run[$i]}"
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+        done
     fi
 
-    tmux select-layout -t "$TMUX_SESSION" tiled
+    local total_workers=${#pane_cmds[@]}
+
+    # Existing session: add panes in tiled layout (no new orchestrator)
+    if [[ "$session_exists" == "true" ]]; then
+        log "Adding $total_workers pane(s) to existing tmux session '$TMUX_SESSION'..."
+        for (( i=0; i<total_workers; i++ )); do
+            tmux split-window -t "$TMUX_SESSION" "${pane_cmds[$i]}"
+            tmux select-layout -t "$TMUX_SESSION" tiled
+        done
+        tmux select-layout -t "$TMUX_SESSION" tiled
+        log "Added $total_workers pane(s) to existing session '$TMUX_SESSION'."
+        log "  Attach:  tmux attach -t $TMUX_SESSION"
+        if [[ -z "${TMUX:-}" ]]; then
+            exec tmux attach -t "$TMUX_SESSION"
+        else
+            log "(Already inside tmux — switch with: tmux switch -t $TMUX_SESSION)"
+        fi
+        return 0
+    fi
+
+    # New session: build orchestrator + worker layout and init the event log
+    mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+    > "${WORKTREE_BASE}/.abr-ipc/events.log"   # fresh log for this run
+
+    local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total_workers"
+    log "Creating tmux session '$TMUX_SESSION' with orchestrator + $total_workers worker pane(s)..."
+
+    if [[ $total_workers -eq 1 ]]; then
+        # Layout: orchestrator top, agent bottom
+        tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+        tmux rename-window -t "$TMUX_SESSION" "agents"
+        tmux split-window -v -t "$TMUX_SESSION" "${pane_cmds[0]}"
+    else
+        # Layout: left column | orchestrator (center, full-height) | right column
+        # left gets floor(N/2) agents, right gets ceil(N/2) agents
+        local left_total=$(( total_workers / 2 ))
+        local right_total=$(( total_workers - left_total ))
+
+        # Start with orchestrator in the only pane
+        tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+        tmux rename-window -t "$TMUX_SESSION" "agents"
+
+        # Split left column before the orchestrator (-b = before active pane)
+        tmux split-window -h -b -t "$TMUX_SESSION" "${pane_cmds[0]}"
+        # pane 0 = left-agent-1, pane 1 = orchestrator
+
+        # Split right column after the orchestrator (target pane 1)
+        tmux split-window -h -t "$TMUX_SESSION:0.1" "${pane_cmds[$left_total]}"
+        # pane 0 = left-agent-1, pane 1 = orchestrator, pane 2 = right-agent-1
+
+        # Equalize the three main columns
+        tmux select-layout -t "$TMUX_SESSION" even-horizontal
+
+        # Fill left column by splitting the bottom of the left stack
+        local left_tail=0
+        for (( i=1; i<left_total; i++ )); do
+            tmux split-window -v -t "$TMUX_SESSION:0.$left_tail" "${pane_cmds[$i]}"
+            (( left_tail++ ))
+        done
+
+        # Fill right column by splitting the bottom of the right stack
+        # right column base index = left_total (left panes) + 1 (orchestrator)
+        local right_base=$(( left_total + 1 ))
+        local right_tail=$right_base
+        for (( i=1; i<right_total; i++ )); do
+            tmux split-window -v -t "$TMUX_SESSION:0.$right_tail" "${pane_cmds[$(( left_total + i ))]}"
+            (( right_tail++ ))
+        done
+    fi
 
     log "Tmux session: $TMUX_SESSION"
-    [[ "$session_exists" == "true" ]] && log "Added $PARALLEL pane(s) to existing session."
     [[ "$LOOP_MODE" == "true" ]] && log "Mode: each pane loops (fresh session per bead)"
     [[ "$LOOP_MODE" != "true" ]] && log "Mode: each pane works one bead then exits"
     log ""
@@ -1787,8 +1921,7 @@ review_one_pr() {
     local pr_number="$1"
 
     log "--- Reviewing PR #${pr_number} ---"
-
-    # Get PR metadata
+    ipc_event "START" "Reviewing PR #${pr_number}"
     local pr_json
     pr_json=$(gh pr view "$pr_number" --json headRefName,title,state,additions,deletions,files 2>&1) || {
         logr "Failed to fetch PR #${pr_number}: $pr_json"
@@ -2102,6 +2235,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                        ipc_event "DONE" "PR #${pr_number} merged (after rebase)"
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
                         logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
@@ -2113,6 +2247,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                     logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
                     bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
                     [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "CONFLICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                    ipc_event "ERROR" "PR #${pr_number} merge conflict (manual resolution needed)"
                 fi
             else
                 # Merge succeeded — clean up remote branch
@@ -2120,6 +2255,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                 log "PR #${pr_number} merged and branch cleaned up."
                 [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                ipc_event "DONE" "PR #${pr_number} approved and merged"
             fi
             ;;
 
@@ -2154,6 +2290,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 log "Created follow-up bead for fixes.${followup_id:+ ($followup_id)}"
             fi
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "REJECTED|${pr_number}|${bead_id}|${pr_title}|${followup_id}" >> "$REVIEW_SUMMARY_FILE"
+            ipc_event "DONE" "PR #${pr_number} rejected (${bead_id})"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review. See review comment for details." \
@@ -2186,6 +2323,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
             followup_id_unk=$(echo "$create_out_unk" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
             log "Created follow-up bead for rework.${followup_id_unk:+ ($followup_id_unk)}"
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "ERROR|${pr_number}|${bead_id}|${pr_title}|${followup_id_unk}" >> "$REVIEW_SUMMARY_FILE"
+            ipc_event "ERROR" "PR #${pr_number} unreadable verdict"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review (unreadable verdict). See review comment for raw output." \
@@ -2211,6 +2349,7 @@ run_review() {
         # Review a specific PR
         REVIEW_SUMMARY_FILE=$(mktemp)
         review_one_pr "$TARGET_PR"
+        ipc_event "EXIT" "Review of PR #$TARGET_PR complete"
         print_review_summary "$REVIEW_SUMMARY_FILE"
         rm -f "$REVIEW_SUMMARY_FILE"
         REVIEW_SUMMARY_FILE=""
@@ -2277,31 +2416,57 @@ for p in agent_prs:
         local review_agent_flags="--agent '$AGENT_TOOL'"
         [[ -n "$MODEL" ]] && review_agent_flags+=" --model '$MODEL'"
 
+        # Build the worker pane commands
+        local pane_cmds=()
+        for (( i=0; i<total; i++ )); do
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
+        done
+
         if [[ "$session_exists" == "true" ]]; then
             log "Adding $total review pane(s) to existing tmux session '$TMUX_SESSION'..."
             for (( i=0; i<total; i++ )); do
-                local cmd
-                cmd="cd '$REPO_ROOT' && sleep $((i * 3)) && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
-                tmux split-window -t "$TMUX_SESSION" "$cmd"
+                tmux split-window -t "$TMUX_SESSION" "${pane_cmds[$i]}"
                 tmux select-layout -t "$TMUX_SESSION" tiled
             done
+            tmux select-layout -t "$TMUX_SESSION" tiled
         else
-            log "Creating tmux session '$TMUX_SESSION' with $total review pane(s)..."
-            local first_cmd
-            first_cmd="cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[0]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
-            tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 "$first_cmd"
-            tmux rename-window -t "$TMUX_SESSION" "reviews"
+            # New session: orchestrator + review worker layout
+            mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+            > "${WORKTREE_BASE}/.abr-ipc/events.log"
 
-            for (( i=1; i<total; i++ )); do
-                local cmd
-                cmd="cd '$REPO_ROOT' && sleep $((i * 3)) && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read"
-                tmux split-window -t "$TMUX_SESSION" "$cmd"
-                tmux select-layout -t "$TMUX_SESSION" tiled
-            done
+            local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total"
+            log "Creating tmux session '$TMUX_SESSION' with orchestrator + $total review pane(s)..."
+
+            if [[ $total -eq 1 ]]; then
+                tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+                tmux rename-window -t "$TMUX_SESSION" "reviews"
+                tmux split-window -v -t "$TMUX_SESSION" "${pane_cmds[0]}"
+            else
+                local left_total=$(( total / 2 ))
+                local right_total=$(( total - left_total ))
+
+                tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+                tmux rename-window -t "$TMUX_SESSION" "reviews"
+                tmux split-window -h -b -t "$TMUX_SESSION" "${pane_cmds[0]}"
+                tmux split-window -h -t "$TMUX_SESSION:0.1" "${pane_cmds[$left_total]}"
+                tmux select-layout -t "$TMUX_SESSION" even-horizontal
+
+                local left_tail=0
+                for (( i=1; i<left_total; i++ )); do
+                    tmux split-window -v -t "$TMUX_SESSION:0.$left_tail" "${pane_cmds[$i]}"
+                    (( left_tail++ ))
+                done
+
+                local right_base=$(( left_total + 1 ))
+                local right_tail=$right_base
+                for (( i=1; i<right_total; i++ )); do
+                    tmux split-window -v -t "$TMUX_SESSION:0.$right_tail" "${pane_cmds[$(( left_total + i ))]}"
+                    (( right_tail++ ))
+                done
+            fi
         fi
 
-        tmux select-layout -t "$TMUX_SESSION" tiled
-        log "Tmux session: $TMUX_SESSION ($total review panes)"
+        log "Tmux session: $TMUX_SESSION ($total review pane(s))"
         log "  Attach:  tmux attach -t $TMUX_SESSION"
         log "  Kill:    tmux kill-session -t $TMUX_SESSION"
 
@@ -2333,6 +2498,12 @@ for p in agent_prs:
 
 main() {
     cd "$REPO_ROOT"
+
+    # Orchestrator mode: render event dashboard, skip all bd/git checks
+    if [[ -n "${INTERNAL_ORCHESTRATOR:-}" ]]; then
+        run_orchestrator "$INTERNAL_ORCHESTRATOR"
+        return
+    fi
 
     if [[ "$PRUNE_LOCAL_BRANCHES" == "true" || "$PRUNE_REMOTE_BRANCHES" == "true" ]]; then
         [[ "$PRUNE_LOCAL_BRANCHES" == "true" ]] && prune_local_branches
@@ -2420,6 +2591,7 @@ main() {
     fi
 
     run_one_bead "$bead_id"
+    ipc_event "EXIT" "Worker done (single-bead mode)"
 }
 
 main "$@"
