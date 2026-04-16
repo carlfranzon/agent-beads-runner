@@ -1,6 +1,6 @@
 PREFIX ?= /usr/local
 
-.PHONY: install uninstall
+.PHONY: install uninstall install-hooks
 
 install:
 	install -d $(DESTDIR)$(PREFIX)/bin
@@ -8,3 +8,8 @@ install:
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/abr
+
+install-hooks:
+	chmod +x .githooks/pre-commit
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed. ABR_VERSION will be auto-bumped on every commit."

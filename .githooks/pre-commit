@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Auto-bumps ABR_VERSION patch in bin/abr if it was not already changed.
+# Activate with: git config core.hooksPath .githooks
+# Or via:        make install-hooks
+
+# Note: pipefail is intentionally omitted — grep -m1 closes the pipe early
+# after the first match, which causes SIGPIPE (exit 141) on the upstream
+# git-show process.  set -eu (without pipefail) is sufficient here.
+set -eu
+
+ABR_SCRIPT="bin/abr"
+
+# Nothing to do if the file isn't tracked yet
+git ls-files --error-unmatch "$ABR_SCRIPT" &>/dev/null || exit 0
+
+# Staged version (what is about to be committed)
+staged_ver=$(git show ":${ABR_SCRIPT}" 2>/dev/null \
+    | grep -m1 '^ABR_VERSION=' | sed 's/ABR_VERSION="//;s/"//') || true
+
+# Committed version (HEAD; empty on the very first commit)
+head_ver=$(git show "HEAD:${ABR_SCRIPT}" 2>/dev/null \
+    | grep -m1 '^ABR_VERSION=' | sed 's/ABR_VERSION="//;s/"//') || true
+
+if [[ "$staged_ver" == "$head_ver" ]]; then
+    # Version not bumped — auto-bump patch component
+    IFS='.' read -r major minor patch <<< "$staged_ver"
+    new_ver="${major}.${minor}.$((patch + 1))"
+
+    # Update working tree
+    sed -i '' "s/^ABR_VERSION=\"${staged_ver}\"/ABR_VERSION=\"${new_ver}\"/" "$ABR_SCRIPT"
+
+    # Re-stage the file so the bump is included in this commit
+    git add "$ABR_SCRIPT"
+
+    echo "[pre-commit] ABR_VERSION auto-bumped: ${staged_ver} → ${new_ver}"
+fi
