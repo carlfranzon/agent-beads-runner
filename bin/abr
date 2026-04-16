@@ -435,6 +435,27 @@ Graceful stop (loop mode):
   Press Ctrl+C once during a loop to finish the current bead and stop.
   Or: touch $REPO_ROOT/.agent-stop   (from another terminal)
   Or: kill -USR1 <pid>               (sends stop signal to the loop)
+  Or (C&C): stop --target A<n>       (per-agent graceful stop from C&C prompt)
+
+Orchestrator dashboard & C&C prompt (parallel mode):
+  When --parallel-N is used, a central orchestrator pane sits between the
+  agent columns showing live colour-coded events.  The bottom 4 lines of the
+  orchestrator are a dedicated Command & Control (C&C) prompt (abr> ).
+
+  abr> run  --target A1 [--agent X] [--model Y] [extra-abr-flags]
+             Respawn the agent in pane A1 via tmux respawn-pane -k.
+             Defaults to --loop; any extra abr flags are forwarded.
+  abr> stop  --target A2
+             Graceful stop — worker finishes its current bead, then exits.
+  abr> kill  --target A3
+             Hard-kill the pane; layout grid is preserved (respawn placeholder).
+  abr> status
+             Print a pane-alias → tmux-pane-ID liveness table in the dashboard.
+  abr> help  Print command reference in the dashboard (scrolls in large pane).
+  abr> exit  Close the C&C prompt.
+
+  Pane aliases: A1 = first worker, A2 = second, etc. (assigned in launch order)
+  Alias → pane-ID map is stored in <worktree-base>/.abr-ipc/pane-A<n>.
 
 Options:
   --loop                Keep respawning agents until no ready beads remain

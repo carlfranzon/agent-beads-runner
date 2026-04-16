@@ -8,6 +8,8 @@ Run `abr` from any beads-enabled git repo to automatically pick a bead, create a
 
 - **Multi-agent support** — Copilot CLI, Claude Code, Gemini CLI, Codex CLI
 - **Parallel execution** — Run N agents simultaneously in tmux panes
+- **Orchestrator dashboard** — Live colour-coded event feed in the center tmux pane
+- **C&C prompt** — Interactive `abr>` command prompt to respawn, stop, or kill individual agent panes on the fly
 - **Loop mode** — Keep picking beads until none remain
 - **PR review** — Automated code review of agent-created PRs with agent-assisted conflict resolution
 - **Model shortcuts** — Short names for all major models with effort/reasoning control
@@ -164,6 +166,27 @@ Override the config file location with `ABR_CONFIG` env var.
 - Press **Ctrl+C** once to finish the current bead and stop
 - `touch .agent-stop` in the repo root (from another terminal)
 - `kill -USR1 <pid>`
+- From the C&C prompt: `stop --target A<n>` (per-agent graceful stop)
+
+## Orchestrator Dashboard & C&C Prompt
+
+When `--parallel-N` is used, a central orchestrator pane sits between the agent columns and shows a live colour-coded event feed. The bottom 4 lines of that pane are an interactive **Command & Control (C&C) prompt** (`abr> `).
+
+Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tmux pane IDs stored in `.abr-ipc/pane-A<n>`.
+
+| Command | Effect |
+|---|---|
+| `run --target A1 [--agent X] [--model Y] [flags]` | Hot-swap: respawn agent in pane A1. Defaults to `--loop`; any extra abr flags are forwarded. |
+| `stop --target A2` | Graceful stop: worker exits after finishing its current bead. |
+| `kill --target A3` | Hard-kill: pane is replaced with a placeholder; window layout stays intact. |
+| `status` | Writes a pane-alias → tmux-pane-ID liveness table to the dashboard. |
+| `help` | Writes the command reference to the dashboard pane above. |
+| `exit` / `quit` | Close the C&C prompt. |
+
+**Implementation notes:**
+- `stop` writes `.abr-ipc/stop-A<n>` and sends `C-c`; `should_stop()` checks this file each loop iteration.
+- `kill` uses `tmux respawn-pane -k` with a placeholder command so the visual grid never collapses.
+- `run` uses `tmux respawn-pane -k` to hot-swap into the same pane slot.
 
 ## How It Works
 

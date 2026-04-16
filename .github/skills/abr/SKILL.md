@@ -26,6 +26,10 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Loop through at most 5 beads | `abr --loop-5` |
 | 3 parallel agents | `abr --parallel-3` |
 | 3 parallel agents, each looping | `abr --loop --parallel-3` |
+| Respawn agent in pane A1 (C&C) | `run --target A1 [--model X]` |
+| Graceful stop pane A2 (C&C) | `stop --target A2` |
+| Hard-kill pane A3 (C&C) | `kill --target A3` |
+| Show pane status (C&C) | `status` |
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
@@ -98,6 +102,7 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - Press `Ctrl+C` once to finish the current bead and stop
 - From another terminal: `touch <repo-root>/.agent-stop`
 - Send signal: `kill -USR1 <pid>`
+- From the C&C prompt: `stop --target A<n>` (per-agent graceful stop)
 
 ## Tmux Session Management
 
@@ -105,6 +110,21 @@ Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Cod
 - New `--parallel` panes are added to existing sessions
 - Use `--new-tmux` to create a separate session
 - Override name with `TMUX_SESSION=<name>` env var
+
+## Orchestrator Dashboard & C&C Prompt (Parallel Mode)
+
+When `--parallel-N` is used a central orchestrator pane shows a live colour-coded event feed. The bottom 4 lines of that pane are an interactive **C&C prompt** (`abr> `).
+
+Pane aliases `A1`, `A2`, … are assigned in launch order. The alias→tmux-pane-ID map is stored in `.abr-ipc/pane-A<n>` by each worker.
+
+| Command | Effect |
+|---|---|
+| `run --target A1 [--agent X] [--model Y] [flags]` | Hot-swap: respawn agent via `tmux respawn-pane -k`. Defaults to `--loop`. |
+| `stop --target A2` | Graceful stop: worker exits after finishing current bead. |
+| `kill --target A3` | Hard-kill: pane replaced with placeholder; layout intact. |
+| `status` | Pane-alias → ID liveness table written to dashboard. |
+| `help` | Command reference written to dashboard. |
+| `exit` / `quit` | Close the C&C prompt. |
 
 ## Config Files
 
