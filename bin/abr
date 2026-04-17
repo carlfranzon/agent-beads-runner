@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.4"
+ABR_VERSION="0.2.5"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -139,6 +139,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` |
 | Bead action menu (slash) | `/bead` |
 | Slash help | `/help` |
+| Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
@@ -462,6 +463,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /beads              Show bead status board grouped by status
     abr> /bead               Select one bead, then choose an action
     abr> /help               Print slash-command reference in dashboard
+    abr> /exit or /quit      Kill the whole tmux session and return to terminal
 
     Legacy commands still supported:
     abr> run  --target A1 [--agent X] [--model Y] [extra-abr-flags]
@@ -474,7 +476,8 @@ Orchestrator dashboard & C&C prompt (parallel mode):
   abr> status
              Print a pane-alias → tmux-pane-ID liveness table in the dashboard.
   abr> help  Print command reference in the dashboard (scrolls in large pane).
-  abr> exit  Close the C&C prompt.
+    abr> exit/quit
+                         Kill the whole tmux session (all panes) and return to terminal.
 
   Pane aliases: A1 = first worker, A2 = second, etc. (assigned in launch order)
   Alias → pane-ID map is stored in <worktree-base>/.abr-ipc/pane-A<n>.
@@ -1103,7 +1106,7 @@ run_cc() {
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
             status)   cc_cmd_status "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             help|"?") cc_cmd_help "$log" || cmd_rc=$? ;;
-            exit|quit) break ;;
+            exit|quit) cc_cmd_shutdown "$log" || cmd_rc=$?; return 0 ;;
             *) printf '\e[33mUnknown command: %s  (type /help)\e[0m\n' "$cmd" ;;
         esac
         if [[ $cmd_rc -ne 0 ]]; then
@@ -1111,6 +1114,20 @@ run_cc() {
         fi
     done
     printf '\e[90m[C&C closed]\e[0m\n'
+}
+
+cc_cmd_shutdown() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    if [[ -z "$session" ]]; then
+        printf '\e[31mNo tmux session detected for shutdown.\e[0m\n'
+        return 1
+    fi
+    printf '%s|0|INFO|C&C: shutting down tmux session %s\n' "$ts" "$session" >> "$log"
+    # This terminates orchestrator + all worker panes, returning to parent terminal.
+    tmux kill-session -t "$session"
 }
 
 cc_first_target_alias() {
@@ -1549,6 +1566,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /beads               Show kanban-style bead board\n' "$ts"
         printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
         printf '%s|0|INFO|  /help                Print this help\n' "$ts"
+        printf '%s|0|INFO|  /exit or /quit       Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|\n' "$ts"
         printf '%s|0|INFO|Legacy commands (still supported):\n' "$ts"
         printf '%s|0|INFO|  run  --target A1 [--agent X] [--model Y]  Respawn agent in pane\n' "$ts"
@@ -1557,7 +1575,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  kill  --target A3     Hard-kill pane (layout preserved)\n' "$ts"
         printf '%s|0|INFO|  status                Show pane→ID map and liveness\n' "$ts"
         printf '%s|0|INFO|  help                  Print this message in the dashboard\n' "$ts"
-        printf '%s|0|INFO|  exit / quit           Close this C&C prompt\n' "$ts"
+        printf '%s|0|INFO|  exit / quit           Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|────────────────────────────────────────────────\n' "$ts"
     } >> "$log"
     printf '\e[90m(Help text sent to dashboard above)\e[0m\n'

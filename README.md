@@ -194,7 +194,7 @@ Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tm
 | `kill --target A3` | Hard-kill: pane is replaced with a placeholder; window layout stays intact. |
 | `status` | Writes a pane-alias → tmux-pane-ID liveness table to the dashboard. |
 | `help` | Writes the command reference to the dashboard pane above. |
-| `exit` / `quit` | Close the C&C prompt. |
+| `exit` / `quit` | Kill the whole tmux session (all panes) and return to terminal. |
 
 Slash commands (new):
 
@@ -207,6 +207,7 @@ Slash commands (new):
 | `/beads` | Show kanban-style grouped bead board in dashboard. |
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
 | `/help` | Show slash command reference in dashboard. |
+| `/exit` / `/quit` | Kill the whole tmux session (all panes) and return to terminal. |
 
 **Implementation notes:**
 - `stop` writes `.abr-ipc/stop-A<n>` and sends `C-c`; `should_stop()` checks this file each loop iteration.

@@ -35,6 +35,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` |
 | Bead action menu (slash) | `/bead` |
 | Slash help | `/help` |
+| Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Respawn agent in pane A1 (C&C) | `run --target A1 [--model X]` |
 | Graceful stop pane A2 (C&C) | `stop --target A2` |
 | Hard-kill pane A3 (C&C) | `kill --target A3` |
