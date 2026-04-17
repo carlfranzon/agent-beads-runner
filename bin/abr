@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.0"
+ABR_VERSION="0.2.1"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -608,6 +608,21 @@ done
 
 log()  { echo "[abr] $(date +%H:%M:%S) $*"; }
 logr() { echo "[abr] $(date +%H:%M:%S) $*" >&2; }
+
+print_logo() {
+        cat <<'LOGO'
+
+        _    ____  ____
+     / \  | __ )|  _ \
+    / _ \ |  _ \| |_) |
+ / ___ \| |_) |  _ <
+/_/   \_\____/|_| \_\
+
+            <  abr  >
+ your parallel agent manager
+
+LOGO
+}
 
 # --- Gum and prompt helpers ---------------------------------------------------
 
@@ -3268,6 +3283,8 @@ main() {
     fi
 
     init_ui_support
+
+    print_logo
 
     if [[ "$PRUNE_LOCAL_BRANCHES" == "true" || "$PRUNE_REMOTE_BRANCHES" == "true" ]]; then
         [[ "$PRUNE_LOCAL_BRANCHES" == "true" ]] && prune_local_branches
