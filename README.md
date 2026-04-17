@@ -206,6 +206,7 @@ Slash commands (new):
 | `/model` | Select and persist default model to `.abr.conf`. |
 | `/beads` | Show kanban-style grouped bead board in dashboard. |
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
+| `/prune` | Interactively prune merged local, remote, or both branch sets. |
 | `/help` | Show slash command reference in dashboard. |
 | `/exit` / `/quit` | Kill the whole tmux session (all panes) and return to terminal. |
 
