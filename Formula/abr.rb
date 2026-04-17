@@ -6,6 +6,7 @@ class Abr < Formula
   license "MIT"
 
   depends_on "git"
+  depends_on "gum"
   depends_on "python@3"
 
   def install

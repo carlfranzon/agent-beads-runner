@@ -51,6 +51,7 @@ chmod +x /usr/local/bin/abr
   - [Codex CLI](https://github.com/openai/codex)
 - **[gh](https://cli.github.com/)** — GitHub CLI (for PR creation/review)
 - **[tmux](https://github.com/tmux/tmux)** — (for `--parallel` mode)
+- **[gum](https://github.com/charmbracelet/gum)** — interactive C&C selectors and prompts
 
 ## Usage
 
@@ -72,6 +73,9 @@ abr --parallel-3
 
 # 3 tmux panes, each looping
 abr --loop --parallel-3
+
+# Launch orchestrator dashboard with 4 idle worker panes
+abr --orchestrator
 
 # Use Claude Code instead of Copilot
 abr --agent claude
@@ -116,6 +120,7 @@ abr --set-default-model sonnet46-h
 | `--loop-N` | Loop through at most N beads then stop |
 | `--parallel-N` | Run N agents in tmux panes |
 | `--parallel` | Shorthand for `--parallel-3` |
+| `--orchestrator` | Launch orchestrator + C&C with 4 idle worker panes |
 | `--bead <id>` | Work on a specific bead |
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
@@ -172,6 +177,14 @@ Override the config file location with `ABR_CONFIG` env var.
 
 When `--parallel-N` is used, a central orchestrator pane sits between the agent columns and shows a live colour-coded event feed. The bottom 4 lines of that pane are an interactive **Command & Control (C&C) prompt** (`abr> `).
 
+You can also start an idle orchestration workspace with:
+
+```bash
+abr --orchestrator
+```
+
+This launches the orchestrator and C&C plus 4 worker panes in idle state (no agents started yet).
+
 Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tmux pane IDs stored in `.abr-ipc/pane-A<n>`.
 
 | Command | Effect |
@@ -182,6 +195,18 @@ Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tm
 | `status` | Writes a pane-alias → tmux-pane-ID liveness table to the dashboard. |
 | `help` | Writes the command reference to the dashboard pane above. |
 | `exit` / `quit` | Close the C&C prompt. |
+
+Slash commands (new):
+
+| Command | Effect |
+|---|---|
+| `/go` | Run a single agent on the next ready bead (uses defaults). |
+| `/start` | Interactive launch flow (work target, agents, loops, agent, model, confirm). |
+| `/agent` | Select and persist default agent to `.abr.conf`. |
+| `/model` | Select and persist default model to `.abr.conf`. |
+| `/beads` | Show kanban-style grouped bead board in dashboard. |
+| `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
+| `/help` | Show slash command reference in dashboard. |
 
 **Implementation notes:**
 - `stop` writes `.abr-ipc/stop-A<n>` and sends `C-c`; `should_stop()` checks this file each loop iteration.

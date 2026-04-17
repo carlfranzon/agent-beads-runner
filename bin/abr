@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.1.37"
+ABR_VERSION="0.2.0"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -119,6 +119,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 - At least one agent CLI installed: `copilot`, `claude`, `gemini`, or `codex`
 - `git`, `python3`, `gh` (GitHub CLI) available
 - `tmux` required for `--parallel` mode
+- `gum` for interactive C&C selectors and slash workflows
 
 ## Quick Reference
 
@@ -130,6 +131,14 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Loop through at most 5 beads | `abr --loop-5` |
 | 3 parallel agents | `abr --parallel-3` |
 | 3 parallel agents, each looping | `abr --loop --parallel-3` |
+| Start orchestrator + 4 idle panes | `abr --orchestrator` |
+| Run one bead from C&C (slash) | `/go` |
+| Interactive launch wizard (slash) | `/start` |
+| Set default agent (slash) | `/agent` |
+| Set default model (slash) | `/model` |
+| Show bead board (slash) | `/beads` |
+| Bead action menu (slash) | `/bead` |
+| Slash help | `/help` |
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
@@ -360,6 +369,7 @@ PARALLEL=0        # 0 = no tmux; N = number of tmux panes
 LOOP_MODE=false
 LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
 REVIEW_MODE=false
+ORCHESTRATOR_MODE=false
 DRY_RUN=false
 NEW_TMUX=false
 PRUNE_LOCAL_BRANCHES=false
@@ -372,6 +382,7 @@ INTERNAL_CC=""           # Non-empty = run_cc (command & control) mode; value = 
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
+GUM_AVAILABLE=false
 
 # --- Parse arguments ----------------------------------------------------------
 
@@ -386,6 +397,7 @@ while [[ $# -gt 0 ]]; do
             fi
             shift ;;
         --review)       REVIEW_MODE=true; shift ;;
+        --orchestrator) ORCHESTRATOR_MODE=true; PARALLEL=4; NEW_TMUX=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --new-tmux)     NEW_TMUX=true; shift ;;
         --prune-local-branches) PRUNE_LOCAL_BRANCHES=true; shift ;;
@@ -422,6 +434,7 @@ Usage:
   abr --review                           Review all open agent PRs
   abr --review --pr 5                    Review a specific PR
   abr --review --parallel-3              Review PRs in 3 parallel tmux panes
+    abr --orchestrator                     Launch orchestrator + 4 idle worker panes
     abr --prune-local-branches             Delete merged local agent/* branches
     abr --prune-remote-branches            Delete merged remote agent/* branches
   abr --agent gemini                     Use Gemini CLI
@@ -442,7 +455,16 @@ Orchestrator dashboard & C&C prompt (parallel mode):
   agent columns showing live colour-coded events.  The bottom 4 lines of the
   orchestrator are a dedicated Command & Control (C&C) prompt (abr> ).
 
-  abr> run  --target A1 [--agent X] [--model Y] [extra-abr-flags]
+    abr> /go                 Run a single agent on the next ready bead
+    abr> /start              Interactive launch wizard
+    abr> /agent              Select and persist default agent
+    abr> /model              Select and persist default model
+    abr> /beads              Show bead status board grouped by status
+    abr> /bead               Select one bead, then choose an action
+    abr> /help               Print slash-command reference in dashboard
+
+    Legacy commands still supported:
+    abr> run  --target A1 [--agent X] [--model Y] [extra-abr-flags]
              Respawn the agent in pane A1 via tmux respawn-pane -k.
              Defaults to --loop; any extra abr flags are forwarded.
   abr> stop  --target A2
@@ -465,6 +487,7 @@ Options:
   --bead <id>           Work on a specific bead instead of auto-picking
   --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
   --pr <number>         With --review: review a specific PR number
+    --orchestrator        Start a dedicated orchestrator tmux session with 4 idle worker panes
     --prune-local-branches Delete merged local agent/* branches
     --prune-remote-branches Delete merged remote agent/* branches and stale remote refs
   --agent <tool>        AI tool: copilot (default), claude, gemini, codex
@@ -585,6 +608,150 @@ done
 
 log()  { echo "[abr] $(date +%H:%M:%S) $*"; }
 logr() { echo "[abr] $(date +%H:%M:%S) $*" >&2; }
+
+# --- Gum and prompt helpers ---------------------------------------------------
+
+init_ui_support() {
+    if command -v gum >/dev/null 2>&1; then
+        GUM_AVAILABLE=true
+    else
+        GUM_AVAILABLE=false
+    fi
+}
+
+prompt_choose() {
+    local prompt="$1"
+    shift
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum choose --header "$prompt" "$@"
+        return $?
+    fi
+    echo "$prompt" >&2
+    local i=1
+    for item in "$@"; do
+        echo "  $i) $item" >&2
+        i=$((i + 1))
+    done
+    printf "Enter choice [1-%d]: " "$#" >&2
+    local pick
+    read -r pick
+    if [[ ! "$pick" =~ ^[0-9]+$ ]] || [[ "$pick" -lt 1 ]] || [[ "$pick" -gt "$#" ]]; then
+        return 1
+    fi
+    eval "echo \"\${$pick}\""
+}
+
+prompt_input() {
+    local prompt="$1"
+    local placeholder="${2:-}"
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum input --prompt "$prompt " --placeholder "$placeholder"
+        return $?
+    fi
+    printf "%s " "$prompt" >&2
+    read -r value
+    echo "$value"
+}
+
+prompt_confirm() {
+    local prompt="$1"
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum confirm "$prompt"
+        return $?
+    fi
+    printf "%s [y/N]: " "$prompt" >&2
+    local yn
+    read -r yn
+    [[ "$yn" =~ ^[Yy]$ ]]
+}
+
+persist_default_setting() {
+    local key="$1"
+    local value="$2"
+    local conf_file="${REPO_ROOT}/.abr.conf"
+    touch "$conf_file"
+    grep -v "^${key}[[:space:]]*=" "$conf_file" > "${conf_file}.tmp" || true
+    printf '%s = %s\n' "$key" "$value" >> "${conf_file}.tmp"
+    mv "${conf_file}.tmp" "$conf_file"
+}
+
+select_count_quick_custom() {
+    local title="$1"
+    local choice
+    choice=$(prompt_choose "$title" "1" "2" "3" "4" "custom") || return 1
+    if [[ "$choice" == "custom" ]]; then
+        local custom
+        custom=$(prompt_input "Enter integer (>4):" "5") || return 1
+        if [[ ! "$custom" =~ ^[0-9]+$ ]] || [[ "$custom" -le 4 ]]; then
+            return 1
+        fi
+        echo "$custom"
+        return 0
+    fi
+    echo "$choice"
+}
+
+get_bead_ids_for_status() {
+    local status="$1"
+    bd_locked "$status" --json 2>/dev/null | python3 -c '
+import json,sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    data = data.get("issues", [])
+for issue in data:
+    bid = issue.get("id")
+    if bid:
+        print(bid)
+'
+}
+
+cc_render_status_bar() {
+    local ipc_dir="$1"
+    local num_workers="$2"
+    local running=0 idle=0
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+
+    for (( i=1; i<=num_workers; i++ )); do
+        local pane_file="${ipc_dir}/pane-A${i}"
+        [[ -f "$pane_file" ]] || continue
+        local pane_id
+        pane_id=$(<"$pane_file")
+        [[ -n "$pane_id" ]] || continue
+        if [[ -n "$session" ]] && tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | grep -q "^${pane_id} "; then
+            local cmd
+            cmd=$(tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | awk -v p="$pane_id" '$1==p{print $2}')
+            if [[ "$cmd" == "abr" ]]; then
+                running=$((running + 1))
+            else
+                idle=$((idle + 1))
+            fi
+        fi
+    done
+
+    local ready_count open_count inprog_count
+    ready_count=$(get_bead_ids_for_status "ready" | wc -l | tr -d ' ')
+    open_count=$(get_bead_ids_for_status "open" | wc -l | tr -d ' ')
+    inprog_count=$(get_bead_ids_for_status "in-progress" | wc -l | tr -d ' ')
+    local total_not_closed=$((ready_count + open_count + inprog_count))
+
+    local model_display="${MODEL:-auto}"
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        local a_styled m_styled run_styled idle_styled
+        a_styled=$(gum style --bold --foreground 6 "$AGENT_TOOL" 2>/dev/null || echo "$AGENT_TOOL")
+        m_styled=$(gum style --bold --foreground 6 "$model_display" 2>/dev/null || echo "$model_display")
+        run_styled=$(gum style --bold --foreground 2 "$running" 2>/dev/null || echo "$running")
+        idle_styled=$(gum style --bold --foreground 3 "$idle" 2>/dev/null || echo "$idle")
+        printf '\e[90m agent:%s  model:%s\e[0m\n' "$a_styled" "$m_styled"
+        printf '\e[90m running:%s  idle:%s  not-closed:%d  ready:%d\e[0m\n' "$run_styled" "$idle_styled" "$total_not_closed" "$ready_count"
+    else
+        printf '\e[90m agent=%-10s model=%-14s\e[0m\n' "$AGENT_TOOL" "$model_display"
+        printf '\e[90m \e[32mrunning:%-3d\e[90m \e[33midle:%-3d\e[90m  not-closed:%-4d  ready:%-3d\e[0m\n' "$running" "$idle" "$total_not_closed" "$ready_count"
+    fi
+}
 
 # --- Serialize bd access (embedded Dolt supports only one writer) -------------
 #
@@ -790,8 +957,11 @@ ipc_event() {
 run_orchestrator() {
     local num_workers="${1:-1}"
     local log="${WORKTREE_BASE}/.abr-ipc/events.log"
+    local _nw_file="${WORKTREE_BASE}/.abr-ipc/num_workers"
     local script_path
     script_path="$(command -v abr 2>/dev/null || echo "$0")"
+    local gum_flag=""
+    command -v gum >/dev/null 2>&1 && gum_flag=" · gum ✓"
 
     # Split a 4-line C&C prompt pane below this orchestrator pane.
     # TMUX_PANE is set automatically by tmux in each pane's shell environment.
@@ -801,9 +971,9 @@ run_orchestrator() {
     fi
 
     printf '\e[1;36m╔══════════════════════════════════════════╗\e[0m\n'
-    printf '\e[1;36m║      ABR Orchestrator  ·  %d worker(s)      \e[0m\e[1;36m║\e[0m\n' "$num_workers"
+    printf '\e[1;36m║  ABR Orchestrator  ·  %d worker(s)%-9s║\e[0m\n' "$num_workers" "${gum_flag}"
     printf '\e[1;36m╚══════════════════════════════════════════╝\e[0m\n'
-    printf '\e[90mWaiting for agents to start…\e[0m\n\n'
+    printf '\e[90mWaiting for agents to start… (type \e[0m/help\e[90m in C&C below)\e[0m\n\n'
 
     # Wait up to 30s for the event log to appear (workers may not have started yet)
     local waited=0
@@ -847,7 +1017,10 @@ run_orchestrator() {
             EXIT)
                 printf '%s \e[90mEXIT  \e[0m %s\n' "$label" "$msg"
                 (( exit_count++ )) || true
-                [[ $exit_count -ge $num_workers ]] && break ;;
+                # Re-read worker count (may have been expanded by /start via num_workers file)
+                local _cur_nw
+                _cur_nw=$(cat "$_nw_file" 2>/dev/null || echo "$num_workers")
+                [[ $exit_count -ge $_cur_nw ]] && break ;;
             INFO)
                 printf '%s \e[90mINFO  \e[0m %s\n' "$label" "$msg" ;;
             *)
@@ -875,33 +1048,325 @@ run_orchestrator() {
 # can target, stop, kill, or hot-swap individual worker panes.
 
 run_cc() {
-    local num_workers="${1:-1}"
+    local initial_num_workers="${1:-1}"
     local ipc_dir="${WORKTREE_BASE}/.abr-ipc"
     local log="${ipc_dir}/events.log"
+    local _nw_file="${ipc_dir}/num_workers"
+
+    # Persist current worker count so /start can expand it dynamically
+    echo "$initial_num_workers" > "$_nw_file"
 
     # Wait briefly for the event log to exist (orchestrator creates it)
     local w=0
     while [[ ! -f "$log" ]] && [[ $w -lt 20 ]]; do sleep 0.5; w=$((w+1)); done
 
-    printf '\e[90m─── C&C ready · type \e[0mhelp\e[90m for commands ──────────\e[0m\n'
+    printf '\e[90m─── C&C ready · type \e[0m/help\e[90m for commands ─────────\e[0m\n'
     while true; do
+        # Re-read worker count each iteration (may be expanded by /start)
+        local num_workers
+        num_workers=$(cat "$_nw_file" 2>/dev/null || echo "$initial_num_workers")
+        cc_render_status_bar "$ipc_dir" "$num_workers"
         printf '\e[1;36mabr>\e[0m '
         IFS= read -r cmdline || break
         [[ -z "$cmdline" ]] && continue
         local -a words
         read -ra words <<< "$cmdline"
         local cmd="${words[0]}"
+        if [[ "$cmd" == /* ]]; then
+            cmd="${cmd#/}"
+        fi
         case "$cmd" in
+            go)       cc_cmd_slash_go "$ipc_dir" "$log" "$num_workers" ;;
+            start)    cc_cmd_slash_start "$ipc_dir" "$log" "$_nw_file" ;;
+            agent)    cc_cmd_slash_agent "$log" ;;
+            model)    cc_cmd_slash_model "$log" ;;
+            beads)    cc_cmd_slash_beads "$log" ;;
+            bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" ;;
             run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" ;;
             stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" ;;
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" ;;
             status)   cc_cmd_status "$ipc_dir" "$log" "$num_workers" ;;
             help|"?") cc_cmd_help "$log" ;;
             exit|quit) break ;;
-            *) printf '\e[33mUnknown command: %s  (type help)\e[0m\n' "$cmd" ;;
+            *) printf '\e[33mUnknown command: %s  (type /help)\e[0m\n' "$cmd" ;;
         esac
     done
     printf '\e[90m[C&C closed]\e[0m\n'
+}
+
+cc_first_target_alias() {
+    local ipc_dir="$1"
+    local num_workers="$2"
+    for (( i=1; i<=num_workers; i++ )); do
+        if [[ -f "${ipc_dir}/pane-A${i}" ]]; then
+            echo "A${i}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+cc_cmd_slash_go() {
+    local ipc_dir="$1" log="$2" num_workers="$3"
+    local target
+    local -a run_args
+    target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
+        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        return 1
+    }
+    run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run)
+    [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+    cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+}
+
+cc_cmd_slash_agent() {
+    local log="$1"
+    local selected
+    selected=$(prompt_choose "Select default agent" "copilot" "claude" "gemini" "codex") || {
+        printf '\e[31mAgent selection cancelled.\e[0m\n'
+        return 1
+    }
+    AGENT_TOOL="$selected"
+    persist_default_setting "agent" "$selected"
+    local ts; ts=$(date +%H:%M:%S)
+    printf '%s|0|INFO|Default agent set to %s (persisted to .abr.conf)\n' "$ts" "$selected" >> "$log"
+    printf '\e[32mDefault agent set to %s\e[0m\n' "$selected"
+}
+
+get_model_list_for_agent() {
+    case "$1" in
+        copilot) echo "sonnet46-h sonnet45-h opus46-h gpt54 gpt54m gpt53c gem25p haiku gpt52 gpt41" ;;
+        claude)  echo "sonnet46 sonnet45 opus46 opus45 haiku sonnet4" ;;
+        gemini)  echo "25-pro 25-flash 31-pro 3-flash 2-flash" ;;
+        codex)   echo "gpt54 gpt54m gpt53c gpt52 gpt41 o4m o3m" ;;
+        *)       echo "sonnet46-h gpt54 gem25p" ;;
+    esac
+}
+
+cc_cmd_slash_model() {
+    local log="$1"
+    local agent="${2:-$AGENT_TOOL}"
+    local -a model_opts
+    read -ra model_opts <<< "$(get_model_list_for_agent "$agent")"
+    local selected
+    selected=$(prompt_choose "Select default model for ${agent}" "${model_opts[@]}") || {
+        printf '\e[31mModel selection cancelled.\e[0m\n'
+        return 1
+    }
+    MODEL="$selected"
+    persist_default_setting "model" "$selected"
+    local ts; ts=$(date +%H:%M:%S)
+    printf '%s|0|INFO|Default model set to %s (persisted to .abr.conf)\n' "$ts" "$selected" >> "$log"
+    printf '\e[32mDefault model set to %s\e[0m\n' "$selected"
+}
+
+# Build a fixed-width kanban column string (box-drawing, no external tools)
+_beads_format_column() {
+    local title="$1" color="$2"
+    shift 2
+    local -a items=("$@")
+    local w=22
+    local border_top border_title border_sep border_bot
+    # Truncate or pad title to w-4 chars
+    local tlen=${#title}
+    local tpad=$(( (w - 2 - tlen) ))
+    [[ $tpad -lt 0 ]] && tpad=0
+    border_top="${color}┌$(printf '─%.0s' $(seq 1 $((w-2))))┐\e[0m"
+    border_title="${color}│\e[1m %-$((w-3))s\e[0m${color}│\e[0m"
+    border_sep="${color}├$(printf '─%.0s' $(seq 1 $((w-2))))┤\e[0m"
+    border_bot="${color}└$(printf '─%.0s' $(seq 1 $((w-2))))┘\e[0m"
+    printf '%b\n' "$border_top"
+    printf "${color}│\e[1;${color#\\e[}m %-$((w-3))s\e[0m${color}│\e[0m\n" "$title"
+    printf '%b\n' "$border_sep"
+    if [[ ${#items[@]} -eq 0 ]] || [[ "${items[0]}" == "(none)" ]]; then
+        printf "${color}│\e[90m %-$((w-3))s\e[0m${color}│\e[0m\n" "(none)"
+    else
+        local item
+        for item in "${items[@]}"; do
+            # Truncate to fit
+            [[ ${#item} -gt $((w-3)) ]] && item="${item:0:$((w-5))}…"
+            printf "${color}│\e[0m %-$((w-3))s${color}│\e[0m\n" "$item"
+        done
+    fi
+    printf '%b\n' "$border_bot"
+}
+
+cc_cmd_slash_beads() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+
+    local -a ready_arr open_arr inprog_arr closed_arr
+    while IFS= read -r b; do [[ -n "$b" ]] && ready_arr+=("$b"); done < <(get_bead_ids_for_status "ready")
+    while IFS= read -r b; do [[ -n "$b" ]] && open_arr+=("$b");  done < <(get_bead_ids_for_status "open")
+    while IFS= read -r b; do [[ -n "$b" ]] && inprog_arr+=("$b"); done < <(get_bead_ids_for_status "in-progress")
+    while IFS= read -r b; do [[ -n "$b" ]] && closed_arr+=("$b"); done < <(get_bead_ids_for_status "closed")
+
+    [[ ${#ready_arr[@]} -eq 0 ]]  && ready_arr=("(none)")
+    [[ ${#open_arr[@]} -eq 0 ]]   && open_arr=("(none)")
+    [[ ${#inprog_arr[@]} -eq 0 ]] && inprog_arr=("(none)")
+    [[ ${#closed_arr[@]} -eq 0 ]] && closed_arr=("(none)")
+
+    # Build each column as an array of lines, then interleave into dashboard
+    local -a col_ready col_open col_inprog col_closed
+    # Collect column lines into arrays (strip ANSI for log, keep for display)
+    local col_r col_o col_i col_c
+    col_r=$(_beads_format_column "READY (${#ready_arr[@]})" "\\e[33m" "${ready_arr[@]}")
+    col_o=$(_beads_format_column "OPEN (${#open_arr[@]})" "\\e[34m" "${open_arr[@]}")
+    col_i=$(_beads_format_column "IN PROGRESS (${#inprog_arr[@]})" "\\e[32m" "${inprog_arr[@]}")
+    col_c=$(_beads_format_column "CLOSED (${#closed_arr[@]})" "\\e[90m" "${closed_arr[@]}")
+
+    {
+        printf '%s|0|INFO|══════════ Beads Kanban Board ══════════════════════\n' "$ts"
+        # Merge up to 4 columns side-by-side
+        local -a lr lo li lc
+        mapfile -t lr <<< "$col_r"
+        mapfile -t lo <<< "$col_o"
+        mapfile -t li <<< "$col_i"
+        mapfile -t lc <<< "$col_c"
+        local maxrows=${#lr[@]}
+        [[ ${#lo[@]} -gt $maxrows ]] && maxrows=${#lo[@]}
+        [[ ${#li[@]} -gt $maxrows ]] && maxrows=${#li[@]}
+        [[ ${#lc[@]} -gt $maxrows ]] && maxrows=${#lc[@]}
+        local row
+        for (( row=0; row<maxrows; row++ )); do
+            local line
+            line=$(printf '%-23s %-23s %-23s %-23s' \
+                "${lr[$row]:-}" "${lo[$row]:-}" "${li[$row]:-}" "${lc[$row]:-}")
+            printf '%s|0|INFO|%s\n' "$ts" "$line"
+        done
+        printf '%s|0|INFO|══════════════════════════════════════════════════════\n' "$ts"
+    } >> "$log"
+    printf '\e[90m(Beads board sent to dashboard above)\e[0m\n'
+}
+
+cc_select_active_bead() {
+    local beads
+    beads=$( { get_bead_ids_for_status "ready"; get_bead_ids_for_status "open"; get_bead_ids_for_status "in-progress"; } | awk 'NF')
+    [[ -n "$beads" ]] || return 1
+    local -a opts=()
+    while IFS= read -r bead; do
+        [[ -n "$bead" ]] && opts+=("$bead")
+    done <<< "$beads"
+    prompt_choose "Select bead" "${opts[@]}"
+}
+
+cc_cmd_slash_bead() {
+    local ipc_dir="$1" log="$2" num_workers="$3"
+    local bead
+    bead=$(cc_select_active_bead) || {
+        printf '\e[31mNo active beads available to select.\e[0m\n'
+        return 1
+    }
+    local action
+    action=$(prompt_choose "Action for ${bead}" "send to an agent" "show info" "close") || return 1
+    case "$action" in
+        "send to an agent")
+            local target
+            local -a run_args
+            target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || return 1
+            run_args=(--target "$target" --agent "$AGENT_TOOL" --bead "$bead" --single-run)
+            [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+            cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+            ;;
+        "show info")
+            bd_locked show "$bead" || true
+            ;;
+        "close")
+            if prompt_confirm "Close bead ${bead}?"; then
+                if bd_locked close "$bead"; then
+                    printf '\e[32mClosed bead %s\e[0m\n' "$bead"
+                    printf '%s|0|INFO|Closed bead %s via /bead\n' "$(date +%H:%M:%S)" "$bead" >> "$log"
+                else
+                    printf '\e[31mFailed to close bead %s\e[0m\n' "$bead"
+                fi
+            fi
+            ;;
+    esac
+}
+
+_cc_spawn_idle_pane() {
+    local ipc_dir="$1"
+    local idx="$2"
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    [[ -z "$session" ]] && return 1
+    local idle_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-A${idx}'; printf '\\033[90m[A${idx} idle] Use /go or /start from C&C to launch\\033[0m\\n'; read -r _"
+    tmux split-window -v -t "${session}" "$idle_cmd" 2>/dev/null || return 1
+    tmux select-layout -t "${session}" tiled 2>/dev/null || true
+    sleep 0.4   # brief wait for pane to register its TMUX_PANE
+}
+
+cc_cmd_slash_start() {
+    local ipc_dir="$1" log="$2" _nw_file="$3"
+    local num_workers
+    num_workers=$(cat "$_nw_file" 2>/dev/null || echo "4")
+    local work_target agent_count loop_count chosen_agent chosen_model
+
+    work_target=$(prompt_choose "Step 1: what do you want to work on?" "next ready bead(s)" "specific bead") || return 1
+    agent_count=$(select_count_quick_custom "Step 2: how many agents?") || {
+        printf '\e[31mInvalid agent count.\e[0m\n'
+        return 1
+    }
+    loop_count=$(select_count_quick_custom "Step 3: how many loops per agent?") || {
+        printf '\e[31mInvalid loop count.\e[0m\n'
+        return 1
+    }
+    chosen_agent=$(prompt_choose "Step 4: choose agent (current: ${AGENT_TOOL})" "copilot" "claude" "gemini" "codex") || return 1
+
+    # Step 5: show only models relevant to chosen agent
+    local -a model_opts
+    read -ra model_opts <<< "$(get_model_list_for_agent "$chosen_agent")"
+    chosen_model=$(prompt_choose "Step 5: choose model for ${chosen_agent} (current: ${MODEL:-auto})" "${model_opts[@]}") || return 1
+
+    if ! prompt_confirm "Step 6: GO — ${agent_count} agent(s)  loops=${loop_count}  ${chosen_agent}/${chosen_model}?"; then
+        printf '\e[90mLaunch cancelled.\e[0m\n'
+        return 0
+    fi
+
+    # Expand worker panes if more are needed than currently available
+    if [[ "$agent_count" -gt "$num_workers" ]]; then
+        local needed=$(( agent_count - num_workers ))
+        printf '\e[33mNeed %d more worker pane(s). Spawning…\e[0m\n' "$needed"
+        local n
+        for (( n=num_workers+1; n<=agent_count; n++ )); do
+            if _cc_spawn_idle_pane "$ipc_dir" "$n"; then
+                printf '\e[32mSpawned pane A%d\e[0m\n' "$n"
+            else
+                printf '\e[31mFailed to spawn pane A%d — launching with %d agent(s)\e[0m\n' "$n" "$((n-1))"
+                agent_count=$((n - 1))
+                break
+            fi
+        done
+        echo "$agent_count" > "$_nw_file"
+        num_workers="$agent_count"
+    fi
+
+    local specific_bead=""
+    if [[ "$work_target" == "specific bead" ]]; then
+        specific_bead=$(cc_select_active_bead) || {
+            printf '\e[31mNo bead selected.\e[0m\n'
+            return 1
+        }
+        if [[ "$agent_count" -gt 1 ]]; then
+            printf '\e[33mSpecific bead with multiple agents: only pane A1 will receive the specific bead; others get next ready.\e[0m\n'
+        fi
+    fi
+
+    local i
+    for (( i=1; i<=agent_count; i++ )); do
+        local target="A${i}"
+        local -a run_args=(--target "$target" --agent "$chosen_agent" --model "$chosen_model")
+        if [[ -n "$specific_bead" ]] && [[ $i -eq 1 ]]; then
+            run_args+=(--bead "$specific_bead" --single-run)
+        elif [[ "$loop_count" -gt 1 ]]; then
+            run_args+=("--loop-${loop_count}")
+        else
+            run_args+=(--single-run)
+        fi
+        cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+    done
 }
 
 # Resolve a logical alias (A1, A2…) to a tmux pane ID (%N).
@@ -945,17 +1410,23 @@ cc_flag() {
 cc_cmd_run() {
     local ipc_dir="$1" log="$2" num_workers="$3"
     shift 3
-    local target="" model="" agent=""
+    local target="" model="" agent="" bead=""
+    local single_run=false
     target=$(cc_flag "--target" "$@") || true
     model=$(cc_flag  "--model"  "$@") || true
     agent=$(cc_flag  "--agent"  "$@") || true
+    bead=$(cc_flag   "--bead"   "$@") || true
+    for arg; do
+        [[ "$arg" == "--single-run" ]] && single_run=true
+    done
 
-    # Collect extra flags (anything that is not --target/--model/--agent or their values)
+    # Collect extra flags (anything that is not recognized local routing args)
     local extra_flags=() skip_next=false
     for arg; do
         if [[ "$skip_next" == "true" ]]; then skip_next=false; continue; fi
         case "$arg" in
-            --target|--model|--agent) skip_next=true ;;
+            --target|--model|--agent|--bead) skip_next=true ;;
+            --single-run) ;;
             *) extra_flags+=("$arg") ;;
         esac
     done
@@ -970,9 +1441,13 @@ cc_cmd_run() {
     local script_path
     script_path="$(command -v abr 2>/dev/null || echo "$0")"
 
-    local flags="--loop"
+    local flags=""
+    if [[ "$single_run" != "true" ]]; then
+        flags="--loop"
+    fi
     [[ -n "$agent" ]] && flags+=" --agent $agent"
     [[ -n "$model" ]] && flags+=" --model $model"
+    [[ -n "$bead" ]] && flags+=" --bead $bead"
     [[ ${#extra_flags[@]} -gt 0 ]] && flags+=" ${extra_flags[*]}"
 
     # Clear any stale per-agent stop file so the new worker starts cleanly
@@ -1047,7 +1522,16 @@ cc_cmd_help() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
     {
-        printf '%s|0|INFO|─────────────── C&C Commands ───────────────────\n' "$ts"
+        printf '%s|0|INFO|─────────────── C&C Slash Commands ─────────────\n' "$ts"
+        printf '%s|0|INFO|  /go                  Run one agent on next bead\n' "$ts"
+        printf '%s|0|INFO|  /start               Interactive launch wizard\n' "$ts"
+        printf '%s|0|INFO|  /agent               Pick and persist default agent\n' "$ts"
+        printf '%s|0|INFO|  /model               Pick and persist default model\n' "$ts"
+        printf '%s|0|INFO|  /beads               Show kanban-style bead board\n' "$ts"
+        printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
+        printf '%s|0|INFO|  /help                Print this help\n' "$ts"
+        printf '%s|0|INFO|\n' "$ts"
+        printf '%s|0|INFO|Legacy commands (still supported):\n' "$ts"
         printf '%s|0|INFO|  run  --target A1 [--agent X] [--model Y]  Respawn agent in pane\n' "$ts"
         printf '%s|0|INFO|         Extra abr flags (e.g. --loop-5) are forwarded.\n' "$ts"
         printf '%s|0|INFO|  stop  --target A2     Graceful stop (finishes current bead)\n' "$ts"
@@ -1755,7 +2239,11 @@ launch_tmux() {
         else
             log "[DRY RUN] Would create tmux session '$TMUX_SESSION' with $PARALLEL pane(s) + orchestrator"
         fi
-        log "[DRY RUN] Each pane runs: abr $pane_flags"
+        if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
+            log "[DRY RUN] Each worker pane starts idle (no agent command yet)"
+        else
+            log "[DRY RUN] Each pane runs: abr $pane_flags"
+        fi
         if [[ "$LOOP_MODE" == "true" ]]; then
             log "[DRY RUN] Each pane loops with fresh sessions per bead"
         else
@@ -1793,7 +2281,11 @@ launch_tmux() {
 
     # Build the array of worker commands
     local pane_cmds=()
-    if [[ "$LOOP_MODE" == "true" ]]; then
+    if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
+        for (( i=0; i<PARALLEL; i++ )); do
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; printf '\\033[90m[A$((i+1)) idle] Use /go or /start from C&C to launch\\033[0m\\n'; read -r _")
+        done
+    elif [[ "$LOOP_MODE" == "true" ]]; then
         local loop_flag="--loop"
         [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
         for (( i=0; i<PARALLEL; i++ )); do
@@ -1895,8 +2387,13 @@ launch_tmux() {
     fi
 
     log "Tmux session: $TMUX_SESSION"
-    [[ "$LOOP_MODE" == "true" ]] && log "Mode: each pane loops (fresh session per bead)"
-    [[ "$LOOP_MODE" != "true" ]] && log "Mode: each pane works one bead then exits"
+    if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
+        log "Mode: orchestrator with idle worker panes"
+    elif [[ "$LOOP_MODE" == "true" ]]; then
+        log "Mode: each pane loops (fresh session per bead)"
+    else
+        log "Mode: each pane works one bead then exits"
+    fi
     log ""
     log "  Attach:  tmux attach -t $TMUX_SESSION"
     log "  Kill:    tmux kill-session -t $TMUX_SESSION"
@@ -2765,9 +3262,12 @@ main() {
 
     # C&C mode: run the interactive command prompt, skip all bd/git checks
     if [[ -n "${INTERNAL_CC:-}" ]]; then
+        init_ui_support
         run_cc "$INTERNAL_CC"
         return
     fi
+
+    init_ui_support
 
     if [[ "$PRUNE_LOCAL_BRANCHES" == "true" || "$PRUNE_REMOTE_BRANCHES" == "true" ]]; then
         [[ "$PRUNE_LOCAL_BRANCHES" == "true" ]] && prune_local_branches
@@ -2826,6 +3326,11 @@ main() {
     # Review mode — review open agent PRs
     if [[ "$REVIEW_MODE" == "true" ]]; then
         run_review
+        return
+    fi
+
+    if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
+        launch_tmux
         return
     fi
 

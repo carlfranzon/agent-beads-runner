@@ -15,6 +15,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 - At least one agent CLI installed: `copilot`, `claude`, `gemini`, or `codex`
 - `git`, `python3`, `gh` (GitHub CLI) available
 - `tmux` required for `--parallel` mode
+- `gum` for interactive C&C selectors and slash workflows
 
 ## Quick Reference
 
@@ -26,6 +27,14 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Loop through at most 5 beads | `abr --loop-5` |
 | 3 parallel agents | `abr --parallel-3` |
 | 3 parallel agents, each looping | `abr --loop --parallel-3` |
+| Start orchestrator + 4 idle panes | `abr --orchestrator` |
+| Run one bead from C&C (slash) | `/go` |
+| Interactive launch wizard (slash) | `/start` |
+| Set default agent (slash) | `/agent` |
+| Set default model (slash) | `/model` |
+| Show bead board (slash) | `/beads` |
+| Bead action menu (slash) | `/bead` |
+| Slash help | `/help` |
 | Respawn agent in pane A1 (C&C) | `run --target A1 [--model X]` |
 | Graceful stop pane A2 (C&C) | `stop --target A2` |
 | Hard-kill pane A3 (C&C) | `kill --target A3` |
