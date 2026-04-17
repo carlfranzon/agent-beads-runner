@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.3"
+ABR_VERSION="0.2.4"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1080,7 +1080,7 @@ run_cc() {
         # Re-read worker count each iteration (may be expanded by /start)
         local num_workers
         num_workers=$(cat "$_nw_file" 2>/dev/null || echo "$initial_num_workers")
-        cc_render_status_bar "$ipc_dir" "$num_workers"
+        cc_render_status_bar "$ipc_dir" "$num_workers" || true
         printf '\e[1;36mabr>\e[0m '
         IFS= read -r cmdline || break
         [[ -z "$cmdline" ]] && continue
@@ -1090,21 +1090,25 @@ run_cc() {
         if [[ "$cmd" == /* ]]; then
             cmd="${cmd#/}"
         fi
+        local cmd_rc=0
         case "$cmd" in
-            go)       cc_cmd_slash_go "$ipc_dir" "$log" "$num_workers" ;;
-            start)    cc_cmd_slash_start "$ipc_dir" "$log" "$_nw_file" ;;
-            agent)    cc_cmd_slash_agent "$log" ;;
-            model)    cc_cmd_slash_model "$log" ;;
-            beads)    cc_cmd_slash_beads "$log" ;;
-            bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" ;;
-            run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" ;;
-            stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" ;;
-            kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" ;;
-            status)   cc_cmd_status "$ipc_dir" "$log" "$num_workers" ;;
-            help|"?") cc_cmd_help "$log" ;;
+            go)       cc_cmd_slash_go "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
+            start)    cc_cmd_slash_start "$ipc_dir" "$log" "$_nw_file" || cmd_rc=$? ;;
+            agent)    cc_cmd_slash_agent "$log" || cmd_rc=$? ;;
+            model)    cc_cmd_slash_model "$log" || cmd_rc=$? ;;
+            beads)    cc_cmd_slash_beads "$log" || cmd_rc=$? ;;
+            bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
+            run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" || cmd_rc=$? ;;
+            stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
+            kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
+            status)   cc_cmd_status "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
+            help|"?") cc_cmd_help "$log" || cmd_rc=$? ;;
             exit|quit) break ;;
             *) printf '\e[33mUnknown command: %s  (type /help)\e[0m\n' "$cmd" ;;
         esac
+        if [[ $cmd_rc -ne 0 ]]; then
+            printf '\e[31mCommand failed (exit=%d). C&C stays open.\e[0m\n' "$cmd_rc"
+        fi
     done
     printf '\e[90m[C&C closed]\e[0m\n'
 }
