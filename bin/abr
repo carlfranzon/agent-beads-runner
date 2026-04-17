@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.2"
+ABR_VERSION="0.2.3"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2358,9 +2358,9 @@ launch_tmux() {
     local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total_workers"
     log "Creating tmux session '$TMUX_SESSION' with orchestrator + $total_workers worker pane(s)..."
 
-    # Build layout around a stable pane ID, then start orchestrator in that pane.
-    # This avoids race conditions where numeric pane indexes shift while startup splits occur.
-    tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "printf '\033[90m[abr booting layout]\033[0m\n'"
+    # Build layout around a stable pane ID.
+    # Start the session with orchestrator command directly so the first pane stays alive.
+    tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
     tmux rename-window -t "$TMUX_SESSION" "agents"
     local center_pane
     center_pane=$(tmux list-panes -t "$TMUX_SESSION" -F '#{pane_id}' | head -n1)
@@ -2394,9 +2394,6 @@ launch_tmux() {
             right_tail=$(tmux split-window -v -P -F '#{pane_id}' -t "$right_tail" "${pane_cmds[$(( left_total + i ))]}")
         done
     fi
-
-    # Start orchestrator last, after worker panes are in place.
-    tmux respawn-pane -k -t "$center_pane" "$orch_cmd"
 
     log "Tmux session: $TMUX_SESSION"
     if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
