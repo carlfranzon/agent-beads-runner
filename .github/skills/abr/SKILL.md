@@ -35,6 +35,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` |
 | Bead action menu (slash) | `/bead` |
 | Prune merged branches (slash) | `/prune` |
+| Review open agent PRs (slash) | `/review` |
 | Slash help | `/help` |
 | Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Respawn agent in pane A1 (C&C) | `run --target A1 [--model X]` |

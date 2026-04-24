@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.15"
+ABR_VERSION="0.2.16"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -138,8 +138,9 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Set default model (slash) | `/model` |
 | Show bead board (slash) | `/beads` |
 | Bead action menu (slash) | `/bead` |
-| Slash help | `/help` |
 | Prune merged branches (slash) | `/prune` |
+| Review open agent PRs (slash) | `/review` |
+| Slash help | `/help` |
 | Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
@@ -466,6 +467,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /beads              Show bead status board grouped by status
     abr> /bead               Select one bead, then choose an action
     abr> /prune              Prune merged branches (local, remote, or both)
+    abr> /review             Run a single review agent on open agent PRs
     abr> /help               Print slash-command reference in dashboard
     abr> /exit or /quit      Kill the whole tmux session and return to terminal
 
@@ -1183,6 +1185,7 @@ run_cc() {
             beads)    cc_cmd_slash_beads "$log" || cmd_rc=$? ;;
             bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             prune)    cc_cmd_slash_prune "$log" || cmd_rc=$? ;;
+            review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" || cmd_rc=$? ;;
             stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
@@ -1258,6 +1261,20 @@ cc_cmd_slash_go() {
         return 1
     }
     run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run)
+    [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+    cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+}
+
+# /review — start a single review agent on the next open agent PR
+cc_cmd_slash_review() {
+    local ipc_dir="$1" log="$2" num_workers="$3"
+    local target
+    local -a run_args
+    target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
+        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        return 1
+    }
+    run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review)
     [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
     cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
 }
@@ -1681,6 +1698,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /beads               Show kanban-style bead board\n' "$ts"
         printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
         printf '%s|0|INFO|  /prune               Prune merged local/remote branches\n' "$ts"
+        printf '%s|0|INFO|  /review              Run one review agent on open agent PRs\n' "$ts"
         printf '%s|0|INFO|  /help                Print this help\n' "$ts"
         printf '%s|0|INFO|  /exit or /quit       Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|\n' "$ts"

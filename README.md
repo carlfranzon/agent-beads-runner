@@ -207,6 +207,7 @@ Slash commands (new):
 | `/beads` | Show kanban-style grouped bead board in dashboard. |
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
 | `/prune` | Interactively prune merged local, remote, or both branch sets. |
+| `/review` | Run a single review agent on open agent PRs (uses current agent/model defaults). |
 | `/help` | Show slash command reference in dashboard. |
 | `/exit` / `/quit` | Kill the whole tmux session (all panes) and return to terminal. |
 
