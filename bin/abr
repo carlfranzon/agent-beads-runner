@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.8"
+ABR_VERSION="0.2.9"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -647,17 +647,22 @@ prompt_choose() {
     local num_items=$#
     if [[ "$GUM_AVAILABLE" == "true" ]]; then
         # Expand the tmux pane to fit all options, then restore afterwards.
-        # needed = items + 1 (header) + 1 (cursor/border) + 1 (prompt line)
-        local needed=$(( num_items + 3 ))
+        # needed = items + header(1) + filter(1) + gum padding/border(2) + spare(1) = items + 5
+        local needed=$(( num_items + 5 ))
         local original_height="" resized=false
         if [[ -n "${TMUX_PANE:-}" ]]; then
             original_height=$(tmux display-message -t "$TMUX_PANE" -p '#{pane_height}' 2>/dev/null || echo "")
             if [[ -n "$original_height" ]] && (( needed > original_height )); then
                 tmux resize-pane -t "$TMUX_PANE" -y "$needed" 2>/dev/null && resized=true || true
+                # Brief pause so the pty resize propagates before gum queries terminal size
+                [[ "$resized" == "true" ]] && sleep 0.05 || true
             fi
         fi
+        # Disable errexit around gum so the restore always runs even if gum exits non-zero
+        set +e
         gum choose --header "$prompt" --height "$num_items" "$@"
         local rc=$?
+        set -e
         if [[ "$resized" == "true" ]] && [[ -n "$original_height" ]]; then
             tmux resize-pane -t "$TMUX_PANE" -y "$original_height" 2>/dev/null || true
         fi
