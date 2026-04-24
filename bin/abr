@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.16"
+ABR_VERSION="0.2.17"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -3207,7 +3207,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                     --parent "$bead_id" \
                     --priority 1 2>&1)
                 while read -r line; do log "  $line"; done <<< "$create_out"
-                followup_id=$(echo "$create_out" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
+                followup_id=$(echo "$create_out" | sed -n 's/.*Created issue: \([A-Za-z0-9._-]*\).*/\1/p' | head -1 || echo "")
                 log "Created follow-up bead for fixes.${followup_id:+ ($followup_id)}"
             fi
 
@@ -3247,7 +3247,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 --priority 1 2>&1)
             while read -r line; do log "  $line"; done <<< "$create_out_unk"
             local followup_id_unk
-            followup_id_unk=$(echo "$create_out_unk" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
+            followup_id_unk=$(echo "$create_out_unk" | sed -n 's/.*Created issue: \([A-Za-z0-9._-]*\).*/\1/p' | head -1 || echo "")
             log "Created follow-up bead for rework.${followup_id_unk:+ ($followup_id_unk)}"
 
             # Close the parent bead: work is now tracked in the follow-up child.
