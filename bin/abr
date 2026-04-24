@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.11"
+ABR_VERSION="0.2.12"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -3128,6 +3128,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         git push origin --delete "$branch" 2>/dev/null || true
                         cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
+                        bd_locked close "$bead_id" 2>/dev/null || true
                         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
                         ipc_event "DONE" "PR #${pr_number} merged (after rebase)"
                     else
@@ -3148,6 +3149,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 git push origin --delete "$branch" 2>/dev/null || true
                 cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
                 log "PR #${pr_number} merged and branch cleaned up."
+                bd_locked close "$bead_id" 2>/dev/null || true
                 [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
                 ipc_event "DONE" "PR #${pr_number} approved and merged"
             fi
