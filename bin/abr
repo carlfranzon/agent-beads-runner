@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.12"
+ABR_VERSION="0.2.13"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -3169,9 +3169,6 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 log "  $line"
             done
 
-            # Reopen the bead so it can be reworked
-            bd_locked update "$bead_id" --status open --notes "PR #${pr_number} rejected by review agent: ${summary}" 2>/dev/null || true
-
             # Create a follow-up bead with the specific fixes needed
             local followup_id=""
             if [[ -n "$issues" ]]; then
@@ -3184,6 +3181,15 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 while read -r line; do log "  $line"; done <<< "$create_out"
                 followup_id=$(echo "$create_out" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
                 log "Created follow-up bead for fixes.${followup_id:+ ($followup_id)}"
+            fi
+
+            # Close the parent bead: work is now tracked in the follow-up child.
+            # If no follow-up was created, reopen so it stays on the board.
+            if [[ -n "$followup_id" ]]; then
+                bd_locked close "$bead_id" 2>/dev/null || true
+                log "Closed parent bead $bead_id (work continues in $followup_id)."
+            else
+                bd_locked update "$bead_id" --status open --notes "PR #${pr_number} rejected by review agent: ${summary}" 2>/dev/null || true
             fi
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "REJECTED|${pr_number}|${bead_id}|${pr_title}|${followup_id}" >> "$REVIEW_SUMMARY_FILE"
             ipc_event "DONE" "PR #${pr_number} rejected (${bead_id})"
@@ -3204,9 +3210,6 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 log "  $line"
             done
 
-            # Reopen the bead so it can be reworked
-            bd_locked update "$bead_id" --status open --notes "PR #${pr_number} review produced unreadable verdict '$verdict'. PR closed for rework." 2>/dev/null || true
-
             # Create a follow-up bead to investigate and fix
             local unknown_fix_desc="PR #${pr_number} for ${bead_id} was closed because the review agent produced an unrecognized verdict.\nRaw verdict file:\n${raw_verdict}\n\nInvestigate the issue and re-run the agent or fix manually."
             local create_out_unk
@@ -3218,6 +3221,15 @@ for i, issue in enumerate(data.get('issues', []), 1):
             local followup_id_unk
             followup_id_unk=$(echo "$create_out_unk" | grep -oE '\b[A-Z][A-Z0-9_-]*-[0-9]+\b' | head -1 || echo "")
             log "Created follow-up bead for rework.${followup_id_unk:+ ($followup_id_unk)}"
+
+            # Close the parent bead: work is now tracked in the follow-up child.
+            # If child creation failed, reopen so it stays on the board.
+            if [[ -n "$followup_id_unk" ]]; then
+                bd_locked close "$bead_id" 2>/dev/null || true
+                log "Closed parent bead $bead_id (work continues in $followup_id_unk)."
+            else
+                bd_locked update "$bead_id" --status open --notes "PR #${pr_number} review produced unreadable verdict '$verdict'. PR closed for rework." 2>/dev/null || true
+            fi
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "ERROR|${pr_number}|${bead_id}|${pr_title}|${followup_id_unk}" >> "$REVIEW_SUMMARY_FILE"
             ipc_event "ERROR" "PR #${pr_number} unreadable verdict"
 
