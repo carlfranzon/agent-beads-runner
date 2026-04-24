@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.13"
+ABR_VERSION="0.2.14"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -733,9 +733,20 @@ select_count_quick_custom() {
     echo "$choice"
 }
 
-get_bead_ids_for_status() {
+# Map a human status name to the correct bd CLI args.
+# "ready" uses the blocker-aware subcommand; everything else uses bd list --status.
+_bd_args_for_status() {
     local status="$1"
-    bd_locked "$status" --json 2>/dev/null | python3 -c '
+    case "$status" in
+        ready)       echo "ready --json" ;;
+        in-progress) echo "list --status in_progress --json" ;;
+        closed)      echo "list --status closed --json --all" ;;
+        *)           echo "list --status $status --json" ;;
+    esac
+}
+
+_parse_bead_ids_from_json() {
+    python3 -c '
 import json,sys
 try:
     data = json.load(sys.stdin)
@@ -750,22 +761,19 @@ for issue in data:
 '
 }
 
+get_bead_ids_for_status() {
+    local status="$1"
+    local -a bd_args
+    read -r -a bd_args <<< "$(_bd_args_for_status "$status")"
+    bd_locked "${bd_args[@]}" 2>/dev/null | _parse_bead_ids_from_json
+}
+
 # Read-only status fetch used by non-mutating UI commands.
 get_bead_ids_for_status_unlocked() {
     local status="$1"
-    bd "$status" --json 2>/dev/null | python3 -c '
-import json,sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-if isinstance(data, dict):
-    data = data.get("issues", [])
-for issue in data:
-    bid = issue.get("id")
-    if bid:
-        print(bid)
-'
+    local -a bd_args
+    read -r -a bd_args <<< "$(_bd_args_for_status "$status")"
+    bd "${bd_args[@]}" 2>/dev/null | _parse_bead_ids_from_json
 }
 
 # Returns bead IDs for a status, but caps wait time to keep C&C responsive.
