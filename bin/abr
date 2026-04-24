@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.7"
+ABR_VERSION="0.2.8"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -381,6 +381,7 @@ TARGET_PR=""      # PR number for --review --pr <N>
 REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
 INTERNAL_ORCHESTRATOR=""  # Non-empty = run_orchestrator mode; value = num_workers
 INTERNAL_CC=""           # Non-empty = run_cc (command & control) mode; value = num_workers
+INTERNAL_BEADS_BOARD="" # Non-empty = write beads board to log then exit; value = log path
 AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
@@ -411,6 +412,7 @@ while [[ $# -gt 0 ]]; do
         --model)        MODEL="$2"; shift 2 ;;
         --internal-orchestrator) INTERNAL_ORCHESTRATOR="$2"; shift 2 ;;
         --internal-cc) INTERNAL_CC="$2"; shift 2 ;;
+        --internal-beads-board) INTERNAL_BEADS_BOARD="$2"; shift 2 ;;
         --parallel-[0-9]*)
             PARALLEL="${1#--parallel-}"
             if [[ "$PARALLEL" -lt 1 ]]; then
@@ -743,6 +745,53 @@ for issue in data:
 '
 }
 
+# Read-only status fetch used by non-mutating UI commands.
+get_bead_ids_for_status_unlocked() {
+    local status="$1"
+    bd "$status" --json 2>/dev/null | python3 -c '
+import json,sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    data = data.get("issues", [])
+for issue in data:
+    bid = issue.get("id")
+    if bid:
+        print(bid)
+'
+}
+
+# Returns bead IDs for a status, but caps wait time to keep C&C responsive.
+# Emits IDs on stdout and returns 0 on success, 124 on timeout.
+get_bead_ids_for_status_timed() {
+    local status="$1"
+    local timeout_s="${2:-5}"
+    local tmp
+    tmp=$(mktemp)
+
+    (get_bead_ids_for_status_unlocked "$status" > "$tmp") &
+    local pid=$!
+    local ticks=$((timeout_s * 10))
+
+    while [[ $ticks -gt 0 ]]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            cat "$tmp"
+            rm -f "$tmp"
+            return 0
+        fi
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
+
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$tmp"
+    return 124
+}
+
 cc_render_status_bar() {
     local ipc_dir="$1"
     local num_workers="$2"
@@ -1001,8 +1050,10 @@ run_orchestrator() {
     # Split a 4-line C&C prompt pane below this orchestrator pane.
     # TMUX_PANE is set automatically by tmux in each pane's shell environment.
     if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
-        tmux split-window -v -l 4 -t "${TMUX_PANE}" \
-            "cd '${REPO_ROOT}' && '${script_path}' --internal-cc ${num_workers}; printf '\033[90m[C&C closed]\033[0m\n'; read -r _"
+        local cc_pane
+        cc_pane=$(tmux split-window -v -l 4 -P -F '#{pane_id}' -t "${TMUX_PANE}" \
+            "cd '${REPO_ROOT}' && '${script_path}' --internal-cc ${num_workers}; printf '\033[90m[C&C closed]\033[0m\n'; read -r _")
+        tmux select-pane -t "$cc_pane"
     fi
 
     printf '\e[1;36m╔══════════════════════════════════════════╗\e[0m\n'
@@ -1240,6 +1291,49 @@ cc_cmd_slash_model() {
 }
 
 # Build a fixed-width kanban column string (box-drawing, no external tools)
+# Fetches all bead statuses and writes a plain-text kanban board to the event log.
+# Designed to run as a subprocess (abr --internal-beads-board <log>) so that the
+# C&C prompt stays responsive while bd queries execute.
+_run_beads_board() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+    local -a ready_arr open_arr inprog_arr closed_arr
+    local out
+
+    if out=$(get_bead_ids_for_status_timed "ready" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && ready_arr+=("$b"); done <<< "$out"
+    else
+        ready_arr=("(timeout)")
+    fi
+
+    if out=$(get_bead_ids_for_status_timed "open" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && open_arr+=("$b"); done <<< "$out"
+    else
+        open_arr=("(timeout)")
+    fi
+
+    if out=$(get_bead_ids_for_status_timed "in-progress" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && inprog_arr+=("$b"); done <<< "$out"
+    else
+        inprog_arr=("(timeout)")
+    fi
+
+    if out=$(get_bead_ids_for_status_timed "closed" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && closed_arr+=("$b"); done <<< "$out"
+    else
+        closed_arr=("(timeout)")
+    fi
+
+    {
+        printf '%s|0|INFO|══════════ Beads Board ══════════════════════════════\n' "$ts"
+        printf '%s|0|INFO|  READY       (%d):  %s\n' "$ts" "${#ready_arr[@]}" "${ready_arr[*]:-(none)}"
+        printf '%s|0|INFO|  OPEN        (%d):  %s\n' "$ts" "${#open_arr[@]}"  "${open_arr[*]:-(none)}"
+        printf '%s|0|INFO|  IN-PROGRESS (%d):  %s\n' "$ts" "${#inprog_arr[@]}" "${inprog_arr[*]:-(none)}"
+        printf '%s|0|INFO|  CLOSED      (%d):  %s\n' "$ts" "${#closed_arr[@]}" "${closed_arr[*]:-(none)}"
+        printf '%s|0|INFO|════════════════════════════════════════════════════\n' "$ts"
+    } >> "$log"
+}
+
 _beads_format_column() {
     local title="$1" color="$2"
     shift 2
@@ -1272,50 +1366,15 @@ _beads_format_column() {
 
 cc_cmd_slash_beads() {
     local log="$1"
+    local script_path
+    script_path="$(command -v abr 2>/dev/null || echo "$0")"
     local ts; ts=$(date +%H:%M:%S)
 
-    local -a ready_arr open_arr inprog_arr closed_arr
-    while IFS= read -r b; do [[ -n "$b" ]] && ready_arr+=("$b"); done < <(get_bead_ids_for_status "ready")
-    while IFS= read -r b; do [[ -n "$b" ]] && open_arr+=("$b");  done < <(get_bead_ids_for_status "open")
-    while IFS= read -r b; do [[ -n "$b" ]] && inprog_arr+=("$b"); done < <(get_bead_ids_for_status "in-progress")
-    while IFS= read -r b; do [[ -n "$b" ]] && closed_arr+=("$b"); done < <(get_bead_ids_for_status "closed")
-
-    [[ ${#ready_arr[@]} -eq 0 ]]  && ready_arr=("(none)")
-    [[ ${#open_arr[@]} -eq 0 ]]   && open_arr=("(none)")
-    [[ ${#inprog_arr[@]} -eq 0 ]] && inprog_arr=("(none)")
-    [[ ${#closed_arr[@]} -eq 0 ]] && closed_arr=("(none)")
-
-    # Build each column as an array of lines, then interleave into dashboard
-    local -a col_ready col_open col_inprog col_closed
-    # Collect column lines into arrays (strip ANSI for log, keep for display)
-    local col_r col_o col_i col_c
-    col_r=$(_beads_format_column "READY (${#ready_arr[@]})" "\\e[33m" "${ready_arr[@]}")
-    col_o=$(_beads_format_column "OPEN (${#open_arr[@]})" "\\e[34m" "${open_arr[@]}")
-    col_i=$(_beads_format_column "IN PROGRESS (${#inprog_arr[@]})" "\\e[32m" "${inprog_arr[@]}")
-    col_c=$(_beads_format_column "CLOSED (${#closed_arr[@]})" "\\e[90m" "${closed_arr[@]}")
-
-    {
-        printf '%s|0|INFO|══════════ Beads Kanban Board ══════════════════════\n' "$ts"
-        # Merge up to 4 columns side-by-side
-        local -a lr lo li lc
-        mapfile -t lr <<< "$col_r"
-        mapfile -t lo <<< "$col_o"
-        mapfile -t li <<< "$col_i"
-        mapfile -t lc <<< "$col_c"
-        local maxrows=${#lr[@]}
-        [[ ${#lo[@]} -gt $maxrows ]] && maxrows=${#lo[@]}
-        [[ ${#li[@]} -gt $maxrows ]] && maxrows=${#li[@]}
-        [[ ${#lc[@]} -gt $maxrows ]] && maxrows=${#lc[@]}
-        local row
-        for (( row=0; row<maxrows; row++ )); do
-            local line
-            line=$(printf '%-23s %-23s %-23s %-23s' \
-                "${lr[$row]:-}" "${lo[$row]:-}" "${li[$row]:-}" "${lc[$row]:-}")
-            printf '%s|0|INFO|%s\n' "$ts" "$line"
-        done
-        printf '%s|0|INFO|══════════════════════════════════════════════════════\n' "$ts"
-    } >> "$log"
-    printf '\e[90m(Beads board sent to dashboard above)\e[0m\n'
+    # Always fire-and-forget so the C&C cursor remains interactive.
+    printf '%s|0|INFO|C&C: fetching bead board in background\n' "$ts" >> "$log"
+    printf '\e[90m(fetching bead board in background…)\e[0m\n'
+    "$script_path" --internal-beads-board "$log" >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
 }
 
 cc_select_active_bead() {
@@ -3339,6 +3398,12 @@ main() {
     if [[ -n "${INTERNAL_CC:-}" ]]; then
         init_ui_support
         run_cc "$INTERNAL_CC"
+        return
+    fi
+
+    # Beads-board writer: fetch statuses and write a board entry to the event log
+    if [[ -n "${INTERNAL_BEADS_BOARD:-}" ]]; then
+        _run_beads_board "$INTERNAL_BEADS_BOARD"
         return
     fi
 
