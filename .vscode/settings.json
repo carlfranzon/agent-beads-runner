@@ -3,6 +3,8 @@
         "git push": true,
         "git add": true,
         "git reset": true,
-        "git commit": true
+        "git commit": true,
+        ":": true,
+        "mkdir": true
     }
 }
