@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.14"
+ABR_VERSION="0.2.15"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2342,10 +2342,12 @@ run_loop() {
         # immediately, without waiting for the dolt push to propagate.
         ipc_signal_claimed "$bead_id"
 
-        # Re-invoke this script as a subprocess — completely fresh session
+        # Re-invoke this script as a subprocess — completely fresh session.
+        # ABR_LOOP_CHILD=1 tells the child not to emit an EXIT event; the
+        # parent run_loop() emits a single EXIT when the whole loop is done.
         local loop_invoke_flags=(--bead "$bead_id" --agent "$AGENT_TOOL")
         [[ -n "$MODEL" ]] && loop_invoke_flags+=(--model "$MODEL")
-        "$script_path" "${loop_invoke_flags[@]}" || true
+        ABR_LOOP_CHILD=1 "$script_path" "${loop_invoke_flags[@]}" || true
         completed=$((completed + 1))
         ipc_clear_claim "$bead_id"  # Release IPC claim so other panes know it's done
 
@@ -3529,7 +3531,9 @@ main() {
     fi
 
     run_one_bead "$bead_id"
-    ipc_event "EXIT" "Worker done (single-bead mode)"
+    # Only emit EXIT when running standalone; loop children skip this because
+    # run_loop() emits a single EXIT after all iterations complete.
+    [[ "${ABR_LOOP_CHILD:-}" != "1" ]] && ipc_event "EXIT" "Worker done (single-bead mode)"
 }
 
 main "$@"
