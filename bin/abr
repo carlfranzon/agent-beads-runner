@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.10"
+ABR_VERSION="0.2.11"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1974,8 +1974,8 @@ ${quality_cmds}7. **Report lint findings**: After implementing changes, record b
 
 ## Tool Preferences
 - **Always prefer CLI tools over MCP tools** when both can accomplish the task. CLI tools are faster and consume less context window. Only fall back to MCP tools when the CLI tool cannot get the job done.
-- **Supabase**: If the bead involves Supabase, read the `supabase` skill documentation before running any `supabase` commands. Do NOT run `supabase` commands speculatively or as a setup step — only run them when explicitly required by the bead and after reading the skill rules. The online (remote) Supabase database is always the source of truth; local migration files may be stale.
-- **iOS/macOS builds**: If the bead involves building or testing iOS/macOS code, read the `xcodebuildmcp-cli` skill documentation before running any build commands. Do NOT run `xcodebuildmcp` or `xcodetools` commands speculatively.
+- **Supabase**: If the bead involves Supabase, read the \`supabase\` skill documentation before running any \`supabase\` commands. Do NOT run \`supabase\` commands speculatively or as a setup step — only run them when explicitly required by the bead and after reading the skill rules. The online (remote) Supabase database is always the source of truth; local migration files may be stale.
+- **iOS/macOS builds**: If the bead involves building or testing iOS/macOS code, prefer \`xcodebuild\` (the standard Apple CLI) over MCP tools when both can accomplish the task. Read the \`xcodebuildmcp-cli\` skill documentation before running any build commands.
 
 ## Rules
 - Work ONLY on bead $bead_id — do not touch other beads
@@ -2681,8 +2681,8 @@ If the PR needs changes:
 
 ## Tool Preferences
 - **Always prefer CLI tools over MCP tools** when both can accomplish the task. CLI tools are faster and consume less context window. Only use MCP tools when the CLI tool cannot get the job done.
-- **Supabase**: Do NOT run `supabase` commands speculatively. If the PR involves Supabase changes, read the `supabase` skill documentation for proper evaluation guidance. The online (remote) Supabase database is always the source of truth — local migration files may be stale. If the PR changes schema, note whether the migration was applied to the remote.
-- **iOS/macOS builds**: Do NOT run `xcodebuildmcp` or `xcodetools` commands speculatively. If the PR involves iOS/macOS build changes, read the `xcodebuildmcp-cli` skill documentation for proper evaluation guidance.
+- **Supabase**: Do NOT run \`supabase\` commands speculatively. If the PR involves Supabase changes, read the \`supabase\` skill documentation for proper evaluation guidance. The online (remote) Supabase database is always the source of truth — local migration files may be stale. If the PR changes schema, note whether the migration was applied to the remote.
+- **iOS/macOS builds**: If the PR involves iOS/macOS build changes, prefer \`xcodebuild\` (the standard Apple CLI) over MCP tools when both can accomplish the task. Read the \`xcodebuildmcp-cli\` skill documentation for proper evaluation guidance.
 
 ## Rules
 - Be strict on: placeholders, stubs, incomplete implementations, NEW lint errors in changed files
