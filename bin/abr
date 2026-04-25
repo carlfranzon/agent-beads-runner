@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.18"
+ABR_VERSION="0.2.19"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1130,6 +1130,7 @@ run_orchestrator() {
     done < "$orch_fifo"
 
     kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true   # reap to suppress shell "Terminated" job notice
     rm -f "$orch_fifo"
 
     printf '\n\e[1;36m════════════ Session Summary ════════════\e[0m\n'
@@ -2390,15 +2391,18 @@ run_loop() {
         # parent run_loop() emits a single EXIT when the whole loop is done.
         local loop_invoke_flags=(--bead "$bead_id" --agent "$AGENT_TOOL")
         [[ -n "$MODEL" ]] && loop_invoke_flags+=(--model "$MODEL")
-        ABR_LOOP_CHILD=1 "$script_path" "${loop_invoke_flags[@]}" || true
+        local child_exit=0
+        ABR_LOOP_CHILD=1 "$script_path" "${loop_invoke_flags[@]}" || child_exit=$?
         completed=$((completed + 1))
         ipc_clear_claim "$bead_id"  # Release IPC claim so other panes know it's done
 
-        log "Loop: bead $bead_id session closed ($completed completed). Picking next..."
+        local status_word="ok"
+        [[ $child_exit -ne 0 ]] && status_word="exit=$child_exit"
+        log "Loop: bead $bead_id session closed ($completed processed, $status_word). Picking next..."
         sleep 2  # Brief pause between sessions
     done
 
-    ipc_event "EXIT" "Worker loop done ($completed bead(s) completed)"
+    ipc_event "EXIT" "Worker loop done ($completed bead(s) processed)"
     ipc_cleanup_self  # Remove per-process pull stamp
     rm -f "$STOP_FILE"
 }
