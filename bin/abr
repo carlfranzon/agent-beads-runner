@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.20"
+ABR_VERSION="0.2.21"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2159,9 +2159,9 @@ run_one_bead() {
 
     log "=== Starting agent for bead: $bead_id ==="
     log "Branch: $branch | Worktree: $wt_path"
-    ipc_event "CLAIM" "Bead $bead_id claimed"
 
     if [[ "$DRY_RUN" == "true" ]]; then
+        ipc_event "CLAIM" "Bead $bead_id claimed"
         log "[DRY RUN] Would create worktree and launch $AGENT_TOOL for $bead_id"
         return 0
     fi
@@ -2174,6 +2174,11 @@ run_one_bead() {
         logr "Worktree $wt_path already exists — bead $bead_id is being handled by another agent. Aborting session."
         return 1
     fi
+
+    # Only emit CLAIM after passing the worktree guard — an agent that loses the
+    # race and is blocked above never actually claimed the bead, so it must not
+    # inflate the orchestrator's claim count.
+    ipc_event "CLAIM" "Bead $bead_id claimed"
 
     mkdir -p "$(dirname "$wt_path")"
 
@@ -2277,6 +2282,13 @@ run_one_bead() {
             if [[ $pr_exit -eq 0 ]]; then
                 log "PR created."
                 ipc_event "PR" "PR created for bead $bead_id"
+            elif echo "$pr_out" | grep -qi "already exists"; then
+                # The agent created the PR during its own session.
+                # Extract the URL from the error output and still count it as a PR.
+                local existing_url
+                existing_url=$(echo "$pr_out" | grep -o 'https://[^[:space:]]*' | tail -1)
+                log "PR already exists (agent created it): ${existing_url:-see GitHub}"
+                ipc_event "PR" "PR already existed for bead $bead_id${existing_url:+ ($existing_url)}"
             else
                 logr "PR creation failed (exit=$pr_exit) — resetting bead to 'open' for retry."
                 local pr_note="${pr_out:0:200}"
