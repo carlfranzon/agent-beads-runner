@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.19"
+ABR_VERSION="0.2.20"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1994,10 +1994,12 @@ ${quality_cmds}7. **Report lint findings**: After implementing changes, record b
 8. Complete the session close protocol:
    a. \`git add <changed files>\`
    b. \`git commit -m "feat($bead_id): <concise description>"\`
-   c. \`bd close $bead_id\`
-   d. \`bd dolt push\`
-   e. \`git push --set-upstream origin \$(git branch --show-current)\`
+   c. \`git push --set-upstream origin \$(git branch --show-current)\`
+   d. \`bd close $bead_id\`
+   e. \`bd dolt push\`
    f. \`git status\` — must show "up to date with origin"
+
+   **Important**: Always push the git branch (step c) BEFORE closing the bead (step d). The PR is created by the launcher after you exit — it needs the branch on the remote.
 
 ## Tool Preferences
 - **Always prefer CLI tools over MCP tools** when both can accomplish the task. CLI tools are faster and consume less context window. Only fall back to MCP tools when the CLI tool cannot get the job done.
@@ -2235,7 +2237,31 @@ run_one_bead() {
     if [[ $exit_code -eq 0 ]] && command -v gh &>/dev/null; then
         local remote_branch
         remote_branch=$(git -C "$wt_path" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo "")
-        if [[ -n "$remote_branch" ]]; then
+        if [[ -z "$remote_branch" ]]; then
+            # Fallback: agent may have pushed without --set-upstream; verify via ls-remote
+            if git -C "$wt_path" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
+                remote_branch="origin/$branch"
+                log "Branch $branch found on origin (no local tracking ref — agent pushed without -u)."
+            else
+                # Safety net: push the branch ourselves so the PR can be created
+                log "Branch $branch not on remote — pushing before PR creation..."
+                local push_out push_exit
+                push_out=$(git -C "$wt_path" push --set-upstream origin "$branch" 2>&1)
+                push_exit=$?
+                while IFS= read -r line; do log "  $line"; done <<< "$push_out"
+                if [[ $push_exit -eq 0 ]]; then
+                    remote_branch="origin/$branch"
+                    log "Branch pushed by abr safety net."
+                else
+                    logr "Push failed (exit=$push_exit) — cannot create PR. Resetting bead to 'open' for retry."
+                    bd_locked update "$bead_id" --status open \
+                        --notes "abr: agent did not push; abr safety-net push also failed" 2>/dev/null || true
+                    bd_locked dolt push 2>/dev/null || true
+                    exit_code=1
+                fi
+            fi
+        fi
+        if [[ $exit_code -eq 0 && -n "$remote_branch" ]]; then
             log "Creating PR..."
             local pr_title
             pr_title=$(bd_locked show "$bead_id" --json 2>/dev/null \
@@ -2259,8 +2285,6 @@ run_one_bead() {
                 bd_locked dolt push 2>/dev/null || true
                 exit_code=1
             fi
-        else
-            log "No upstream — agent may not have pushed. Skipping PR."
         fi
     else
         [[ $exit_code -ne 0 ]] && logr "Agent exited with code $exit_code"
