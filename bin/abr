@@ -26,7 +26,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.17"
+ABR_VERSION="0.2.18"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2240,19 +2240,44 @@ run_one_bead() {
             pr_title=$(bd_locked show "$bead_id" --json 2>/dev/null \
                 | python3 -c "import sys,json; print(json.load(sys.stdin).get('title','Work on $bead_id'))" 2>/dev/null \
                 || echo "Work on $bead_id")
-            (cd "$wt_path" && gh pr create \
+            local pr_out pr_exit
+            pr_out=$(cd "$wt_path" && gh pr create \
                 --title "feat($bead_id): $pr_title" \
                 --body "Automated PR for bead \`$bead_id\`. Created by abr." \
-                --base main) 2>&1 | while read -r line; do
-                    log "  $line"
-                done
-            log "PR created."
-            ipc_event "PR" "PR created for bead $bead_id"
+                --base main 2>&1)
+            pr_exit=$?
+            while IFS= read -r line; do log "  $line"; done <<< "$pr_out"
+            if [[ $pr_exit -eq 0 ]]; then
+                log "PR created."
+                ipc_event "PR" "PR created for bead $bead_id"
+            else
+                logr "PR creation failed (exit=$pr_exit) — resetting bead to 'open' for retry."
+                local pr_note="${pr_out:0:200}"
+                bd_locked update "$bead_id" --status open \
+                    --notes "abr: PR creation failed: $pr_note" 2>/dev/null || true
+                bd_locked dolt push 2>/dev/null || true
+                exit_code=1
+            fi
         else
             log "No upstream — agent may not have pushed. Skipping PR."
         fi
     else
         [[ $exit_code -ne 0 ]] && logr "Agent exited with code $exit_code"
+    fi
+
+    # Safety net: if the bead is still in-progress (agent didn't run `bd close`,
+    # PR creation failed, or the agent crashed), reset it to 'open' so it can
+    # be retried rather than staying stuck forever.
+    if [[ $exit_code -ne 0 ]]; then
+        local current_bead_status
+        current_bead_status=$(bd_locked show "$bead_id" --json 2>/dev/null \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null \
+            || echo "")
+        if [[ "$current_bead_status" == "in_progress" || "$current_bead_status" == "in-progress" ]]; then
+            logr "Bead $bead_id still in-progress after failure — resetting to 'open' for retry."
+            bd_locked update "$bead_id" --status open 2>/dev/null || true
+            bd_locked dolt push 2>/dev/null || true
+        fi
     fi
 
     trap - EXIT
