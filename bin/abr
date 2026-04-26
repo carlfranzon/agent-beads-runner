@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.1"
+ABR_VERSION="0.3.2"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -991,17 +991,28 @@ should_stop() {
 
 pick_next_bead() {
     cd "$REPO_ROOT"
+    # Collect locally IPC-claimed bead IDs so we skip beads that a sibling
+    # pane is already working on. Without this filter, when bd ready returns a
+    # claimed bead (bd update --claim doesn't always flip the ready status
+    # instantly) the loop spins indefinitely on IPC-claimed skips.
+    local claimed_ids=""
+    local ipc_claimed_dir="${WORKTREE_BASE}/.abr-ipc/claimed"
+    [[ -d "$ipc_claimed_dir" ]] && claimed_ids=$(ls "$ipc_claimed_dir" 2>/dev/null | tr '\n' ',')
+
     bd_locked ready --json 2>/dev/null \
-        | python3 -c "
-import sys, json
+        | CLAIMED_IDS="$claimed_ids" python3 -c "
+import sys, json, os
+claimed = set(x for x in os.environ.get('CLAIMED_IDS', '').split(',') if x)
 try:
     data = json.load(sys.stdin)
     issues = data if isinstance(data, list) else data.get('issues', [])
     # Sort by priority ascending (lower = higher priority), then prefer deeper
     # sub-beads (longer ID) as a tiebreaker within the same priority level.
     issues.sort(key=lambda x: (x.get('priority', 2), -len(x.get('id', ''))))
-    if issues:
-        print(issues[0]['id'])
+    for issue in issues:
+        if issue['id'] not in claimed:
+            print(issue['id'])
+            break
 except Exception:
     sys.exit(1)
 " 2>/dev/null || echo ""
