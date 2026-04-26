@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.35"
+ABR_VERSION="0.3.0"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -689,7 +689,12 @@ prompt_choose() {
     if [[ ! "$pick" =~ ^[0-9]+$ ]] || [[ "$pick" -lt 1 ]] || [[ "$pick" -gt "$#" ]]; then
         return 1
     fi
-    eval "echo \"\${$pick}\""
+    # Walk positional args to avoid eval
+    local _i=1
+    for _item; do
+        [[ $_i -eq $pick ]] && echo "$_item" && break
+        _i=$(( _i + 1 ))
+    done
 }
 
 prompt_input() {
@@ -734,6 +739,7 @@ select_count_quick_custom() {
         local custom
         custom=$(prompt_input "Enter integer (>4):" "5") || return 1
         if [[ ! "$custom" =~ ^[0-9]+$ ]] || [[ "$custom" -le 4 ]]; then
+            printf '\e[31mCustom value must be an integer greater than 4 (use the quick options for 1–4).\e[0m\n' >&2
             return 1
         fi
         echo "$custom"
@@ -885,9 +891,9 @@ cc_render_status_bar() {
     done
 
     local ready_count open_count inprog_count
-    ready_count=$(get_bead_ids_for_status "ready" | wc -l | tr -d ' ')
-    open_count=$(get_bead_ids_for_status "open" | wc -l | tr -d ' ')
-    inprog_count=$(get_bead_ids_for_status "in-progress" | wc -l | tr -d ' ')
+    ready_count=$(get_bead_ids_for_status_unlocked "ready" | wc -l | tr -d ' ')
+    open_count=$(get_bead_ids_for_status_unlocked "open" | wc -l | tr -d ' ')
+    inprog_count=$(get_bead_ids_for_status_unlocked "in-progress" | wc -l | tr -d ' ')
     local total_not_closed=$((ready_count + open_count + inprog_count))
 
     local model_display="${MODEL:-auto}"
@@ -939,8 +945,9 @@ bd_locked() {
     # Record holder for stale detection
     echo $$ > "$BD_LOCKDIR/pid" 2>/dev/null || true
 
-    bd "$@"
-    local rc=$?
+    # Capture exit code without letting set -e kill the script and orphan the lock dir.
+    local rc=0
+    bd "$@" || rc=$?
 
     rm -rf "$BD_LOCKDIR"
     return $rc
@@ -990,7 +997,9 @@ import sys, json
 try:
     data = json.load(sys.stdin)
     issues = data if isinstance(data, list) else data.get('issues', [])
-    issues.sort(key=lambda x: (-len(x.get('id', '')), x.get('priority', 2)))
+    # Sort by priority ascending (lower = higher priority), then prefer deeper
+    # sub-beads (longer ID) as a tiebreaker within the same priority level.
+    issues.sort(key=lambda x: (x.get('priority', 2), -len(x.get('id', ''))))
     if issues:
         print(issues[0]['id'])
 except Exception:
@@ -1008,7 +1017,7 @@ n = int(sys.argv[1])
 try:
     data = json.load(sys.stdin)
     issues = data if isinstance(data, list) else data.get('issues', [])
-    issues.sort(key=lambda x: (-len(x.get('id', '')), x.get('priority', 2)))
+    issues.sort(key=lambda x: (x.get('priority', 2), -len(x.get('id', ''))))
     for issue in issues[:n]:
         print(issue['id'])
 except Exception:
@@ -1490,36 +1499,6 @@ _run_beads_board() {
         _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]+"${ready_arr[@]}"}" 
         printf '%s|0|INFO|\e[1;37m═════════════════════════════════════════════════════\e[0m\n' "$ts"
     } >> "$log"
-}
-
-_beads_format_column() {
-    local title="$1" color="$2"
-    shift 2
-    local -a items=("$@")
-    local w=22
-    local border_top border_title border_sep border_bot
-    # Truncate or pad title to w-4 chars
-    local tlen=${#title}
-    local tpad=$(( (w - 2 - tlen) ))
-    [[ $tpad -lt 0 ]] && tpad=0
-    border_top="${color}┌$(printf '─%.0s' $(seq 1 $((w-2))))┐\e[0m"
-    border_title="${color}│\e[1m %-$((w-3))s\e[0m${color}│\e[0m"
-    border_sep="${color}├$(printf '─%.0s' $(seq 1 $((w-2))))┤\e[0m"
-    border_bot="${color}└$(printf '─%.0s' $(seq 1 $((w-2))))┘\e[0m"
-    printf '%b\n' "$border_top"
-    printf "${color}│\e[1;${color#\\e[}m %-$((w-3))s\e[0m${color}│\e[0m\n" "$title"
-    printf '%b\n' "$border_sep"
-    if [[ ${#items[@]} -eq 0 ]] || [[ "${items[0]}" == "(none)" ]]; then
-        printf "${color}│\e[90m %-$((w-3))s\e[0m${color}│\e[0m\n" "(none)"
-    else
-        local item
-        for item in "${items[@]}"; do
-            # Truncate to fit
-            [[ ${#item} -gt $((w-3)) ]] && item="${item:0:$((w-5))}…"
-            printf "${color}│\e[0m %-$((w-3))s${color}│\e[0m\n" "$item"
-        done
-    fi
-    printf '%b\n' "$border_bot"
 }
 
 cc_cmd_slash_beads() {
@@ -2356,8 +2335,7 @@ run_one_bead() {
         gemini)
             local gm_args=(--prompt "$prompt" --approval-mode=yolo)
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
-            (cd "$wt_path" && gemini "${gm_args[@]}")
-            ;;
+            (cd "$wt_path" && gemini "${gm_args[@]}") ;;
         codex)
             local cx_args=(exec --full-auto)
             [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
@@ -2643,14 +2621,6 @@ launch_tmux() {
         log "Existing session found. Creating new session: $TMUX_SESSION"
         session_exists=false
     fi
-
-    # Helper: build the shell command for a worker pane.
-    # ABR_AGENT_IDX is set so workers can tag orchestrator events.
-    worker_pane_cmd() {
-        local idx="$1"
-        local flags="$2"
-        echo "ABR_AGENT_IDX=$idx cd '$REPO_ROOT' && '$script_path' $flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read"
-    }
 
     # Per-session log directory in /tmp; deleted on /exit.
     local ABR_LOG_DIR="/tmp/abr-${TMUX_SESSION}"
@@ -3188,7 +3158,7 @@ for f in files:
             (cd "$wt_path" && claude "${cl_args[@]}") || true
             ;;
         gemini)
-            local gm_args=(--prompt "$prompt" --yolo)
+            local gm_args=(--prompt "$prompt" --approval-mode=yolo)
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
             (cd "$wt_path" && gemini "${gm_args[@]}") || true
             ;;
@@ -3271,7 +3241,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                     git fetch origin main &&
                     git checkout "$branch" 2>/dev/null &&
                     git rebase origin/main
-                ) 2>&1 | while read -r line; do log "  rebase: $line"; done
+                ) 2>&1 | while read -r line; do log "  rebase: $line"; done || true
 
                 if (cd "$wt_path" && git rebase --show-current-patch &>/dev/null); then
                     # Rebase is still in progress (conflict) — abort and try agent-assisted merge
@@ -3280,7 +3250,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
                     # Start a merge instead (leaves conflict markers in files)
                     local merge_conflict_ok=false
-                    (cd "$wt_path" && git merge origin/main --no-edit 2>&1) | while read -r line; do log "  merge: $line"; done
+                    (cd "$wt_path" && git merge origin/main --no-edit 2>&1) | while read -r line; do log "  merge: $line"; done || true
 
                     # Check for unmerged paths
                     local conflicted_files
@@ -3312,7 +3282,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                                 (cd "$wt_path" && claude "${cl_args[@]}") || true
                                 ;;
                             gemini)
-                                local gm_args=(--prompt "$conflict_prompt" --yolo)
+                                local gm_args=(--prompt "$conflict_prompt" --approval-mode=yolo)
                                 [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
                                 (cd "$wt_path" && gemini "${gm_args[@]}") || true
                                 ;;
@@ -3621,22 +3591,23 @@ for p in agent_prs:
                 tmux rename-window -t "$TMUX_SESSION" "reviews"
                 local review_center
                 review_center=$(tmux list-panes -t "$TMUX_SESSION" -F '#{pane_id}' | head -n1)
-                tmux split-window -h -b -t "$TMUX_SESSION" "${pane_cmds[0]}"
-                tmux split-window -h -t "$TMUX_SESSION:0.1" "${pane_cmds[$left_total]}"
+
+                # Create root panes for left and right columns using stable pane IDs.
+                local review_left_root review_right_root
+                review_left_root=$(tmux split-window -h -b -P -F '#{pane_id}' -t "$review_center" "${pane_cmds[0]}")
+                review_right_root=$(tmux split-window -h -P -F '#{pane_id}' -t "$review_center" "${pane_cmds[$left_total]}")
+
                 tmux select-layout -t "$TMUX_SESSION" even-horizontal
                 tmux resize-pane -x 250 -t "$review_center"
 
-                local left_tail=0
+                local review_left_tail="$review_left_root"
                 for (( i=1; i<left_total; i++ )); do
-                    tmux split-window -v -t "$TMUX_SESSION:0.$left_tail" "${pane_cmds[$i]}"
-                    (( left_tail++ ))
+                    review_left_tail=$(tmux split-window -v -P -F '#{pane_id}' -t "$review_left_tail" "${pane_cmds[$i]}")
                 done
 
-                local right_base=$(( left_total + 1 ))
-                local right_tail=$right_base
+                local review_right_tail="$review_right_root"
                 for (( i=1; i<right_total; i++ )); do
-                    tmux split-window -v -t "$TMUX_SESSION:0.$right_tail" "${pane_cmds[$(( left_total + i ))]}"
-                    (( right_tail++ ))
+                    review_right_tail=$(tmux split-window -v -P -F '#{pane_id}' -t "$review_right_tail" "${pane_cmds[$(( left_total + i ))]}")
                 done
             fi
         fi
@@ -3753,6 +3724,12 @@ main() {
     log "Syncing beads..."
     bd_locked dolt pull 2>/dev/null || true
 
+    # Warn if --pr was given without --review
+    if [[ -n "$TARGET_PR" && "$REVIEW_MODE" == "false" ]]; then
+        logr "--pr $TARGET_PR has no effect without --review. Did you mean: abr --review --pr $TARGET_PR?"
+        exit 1
+    fi
+
     log "Repo: $REPO_ROOT"
     log "Agent: $AGENT_TOOL | Pkg: $(detect_pkg_manager || echo 'none')"
 
@@ -3795,6 +3772,13 @@ main() {
     local bead_id
     if [[ -n "$TARGET_BEAD" ]]; then
         bead_id="$TARGET_BEAD"
+        # Explicit --bead still needs to claim so parallel agents don't duplicate work.
+        # Skip the IPC/worktree pre-flights (single-agent dispatch; no race).
+        if ! claim_bead "$bead_id"; then
+            log "Bead $bead_id already claimed — aborting."
+            exit 0
+        fi
+        ipc_signal_claimed "$bead_id"
     else
         # Pull first so we see claims written by parallel agents launched at the
         # same time from C&C (/start with multiple agents, 1 loop each).
