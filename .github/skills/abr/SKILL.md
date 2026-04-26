@@ -21,13 +21,13 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 | Goal | Command |
 |------|---------|
-| Work one bead, exit | `abr` |
-| Work a specific bead | `abr --bead <id>` |
+| Launch orchestrator (default) | `abr` |
+| Work one bead, exit | `abr --no-tui` |
+| Work a specific bead | `abr --no-tui --bead <id>` |
 | Loop until no beads left | `abr --loop` |
 | Loop through at most 5 beads | `abr --loop-5` |
 | 3 parallel agents | `abr --parallel-3` |
 | 3 parallel agents, each looping | `abr --loop --parallel-3` |
-| Start orchestrator + 4 idle panes | `abr --orchestrator` |
 | Run one bead from C&C (slash) | `/go` |
 | Interactive launch wizard (slash) | `/start` |
 | Set default agent (slash) | `/agent` |

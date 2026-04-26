@@ -10,7 +10,8 @@ set -euo pipefail
 # Each bead always gets a completely fresh agent session.
 #
 # Usage:
-#   abr                                  # One agent, one bead, exits
+#   abr                                  # Launch orchestrator + 4 idle worker panes (default)
+#   abr --no-tui                         # One agent, one bead, exits (skip orchestrator)
 #   abr --loop                           # Keeps picking beads sequentially until none left
 #   abr --loop-5                         # Loop through at most 5 beads, then stop
 #   abr --parallel-3                     # 3 agents in tmux, each works one bead
@@ -20,13 +21,13 @@ set -euo pipefail
 #   abr --review --parallel-3            # Review PRs in 3 parallel tmux panes
 #   abr --prune-local-branches           # Delete merged local agent/* branches
 #   abr --prune-remote-branches          # Delete merged remote agent/* branches
-#   abr --bead <id>                      # Work a specific bead
+#   abr --no-tui --bead <id>             # Work a specific bead (without orchestrator)
 #   abr --agent gemini                   # Use Gemini CLI (default: copilot)
 #   abr --agent copilot --model opus46-h # Use Copilot with Opus 4.6, high effort
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.23"
+ABR_VERSION="0.2.24"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -125,13 +126,13 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 | Goal | Command |
 |------|---------|
-| Work one bead, exit | `abr` |
-| Work a specific bead | `abr --bead <id>` |
+| Launch orchestrator (default) | `abr` |
+| Work one bead, exit | `abr --no-tui` |
+| Work a specific bead | `abr --no-tui --bead <id>` |
 | Loop until no beads left | `abr --loop` |
 | Loop through at most 5 beads | `abr --loop-5` |
 | 3 parallel agents | `abr --parallel-3` |
 | 3 parallel agents, each looping | `abr --loop --parallel-3` |
-| Start orchestrator + 4 idle panes | `abr --orchestrator` |
 | Run one bead from C&C (slash) | `/go` |
 | Interactive launch wizard (slash) | `/start` |
 | Set default agent (slash) | `/agent` |
@@ -373,6 +374,7 @@ LOOP_MODE=false
 LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
 REVIEW_MODE=false
 ORCHESTRATOR_MODE=false
+NO_TUI=false
 DRY_RUN=false
 NEW_TMUX=false
 PRUNE_LOCAL_BRANCHES=false
@@ -401,6 +403,7 @@ while [[ $# -gt 0 ]]; do
             fi
             shift ;;
         --review)       REVIEW_MODE=true; shift ;;
+        --no-tui)       NO_TUI=true; shift ;;
         --orchestrator) ORCHESTRATOR_MODE=true; PARALLEL=4; NEW_TMUX=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --new-tmux)     NEW_TMUX=true; shift ;;
@@ -430,7 +433,8 @@ abr — Agent Beads Runner
 Portable parallel AI agent launcher using git worktrees + beads
 
 Usage:
-  abr                                    One agent, one bead, exits
+  abr                                    Launch orchestrator + 4 idle worker panes (default)
+  abr --no-tui                           One agent, one bead, exits (skip orchestrator)
   abr --loop                             Keeps picking beads sequentially until none left
   abr --loop-5                           Loop through at most 5 beads, then stop
   abr --parallel-3                       3 agents in tmux panes, each works one bead
@@ -439,9 +443,10 @@ Usage:
   abr --review                           Review all open agent PRs
   abr --review --pr 5                    Review a specific PR
   abr --review --parallel-3              Review PRs in 3 parallel tmux panes
-    abr --orchestrator                     Launch orchestrator + 4 idle worker panes
-    abr --prune-local-branches             Delete merged local agent/* branches
-    abr --prune-remote-branches            Delete merged remote agent/* branches
+  abr --no-tui                           Skip orchestrator TUI, run one bead then exit
+  abr --orchestrator                     Launch orchestrator + 4 idle worker panes (explicit)
+  abr --prune-local-branches             Delete merged local agent/* branches
+  abr --prune-remote-branches            Delete merged remote agent/* branches
   abr --agent gemini                     Use Gemini CLI
   abr --agent copilot --model opus46-h   Use Copilot with Opus 4.6, high effort
   abr --install-skill                    Install abr skill for AI agents
@@ -496,9 +501,10 @@ Options:
   --bead <id>           Work on a specific bead instead of auto-picking
   --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
   --pr <number>         With --review: review a specific PR number
-    --orchestrator        Start a dedicated orchestrator tmux session with 4 idle worker panes
-    --prune-local-branches Delete merged local agent/* branches
-    --prune-remote-branches Delete merged remote agent/* branches and stale remote refs
+  --no-tui              Skip orchestrator TUI; run plain mode (one bead, or with --loop/--parallel)
+  --orchestrator        Start a dedicated orchestrator tmux session with 4 idle worker panes (explicit)
+  --prune-local-branches Delete merged local agent/* branches
+  --prune-remote-branches Delete merged remote agent/* branches and stale remote refs
   --agent <tool>        AI tool: copilot (default), claude, gemini, codex
   --model <name>        Model short name (see table below). Default: per-agent
   --new-tmux            Create a separate tmux session (default: add panes to existing)
@@ -510,7 +516,8 @@ Options:
   -h, --help            Show this help
 
 Modes compose:
-  (default)             One agent → one bead → exit
+  (default)             Orchestrator TUI + 4 idle worker panes (use /start or /go from C&C)
+  --no-tui              One agent → one bead → exit
   --loop / --loop-N     Fresh session per bead → pick next → repeat → exit when none left (or after N)
   --parallel-N          N tmux panes → each works one bead → all exit
   --loop --parallel-N   N tmux panes → each loops (fresh session per bead) → exit when none left
@@ -3613,6 +3620,16 @@ main() {
     log "Agent: $AGENT_TOOL | Pkg: $(detect_pkg_manager || echo 'none')"
 
     # --- Dispatch based on mode ---
+
+    # Default to orchestrator TUI when no explicit mode was requested.
+    # Pass --no-tui to skip this and run a plain single-bead session.
+    if [[ "$NO_TUI" == "false" && "$REVIEW_MODE" == "false" && \
+          "$ORCHESTRATOR_MODE" == "false" && "$PARALLEL" -eq 0 && \
+          "$LOOP_MODE" == "false" ]]; then
+        ORCHESTRATOR_MODE=true
+        PARALLEL=4
+        NEW_TMUX=true
+    fi
 
     # Review mode — review open agent PRs
     if [[ "$REVIEW_MODE" == "true" ]]; then

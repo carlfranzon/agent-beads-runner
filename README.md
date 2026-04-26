@@ -56,11 +56,14 @@ chmod +x /usr/local/bin/abr
 ## Usage
 
 ```bash
-# One agent, one bead, exits
+# Launch orchestrator dashboard with 4 idle worker panes (default)
 abr
 
+# Work one bead then exit (skip orchestrator)
+abr --no-tui
+
 # Work a specific bead
-abr --bead yvs-49h.1.1
+abr --no-tui --bead yvs-49h.1.1
 
 # Loop until no beads remain
 abr --loop
@@ -120,7 +123,8 @@ abr --set-default-model sonnet46-h
 | `--loop-N` | Loop through at most N beads then stop |
 | `--parallel-N` | Run N agents in tmux panes |
 | `--parallel` | Shorthand for `--parallel-3` |
-| `--orchestrator` | Launch orchestrator + C&C with 4 idle worker panes |
+| `--no-tui` | Skip orchestrator TUI; run plain mode (one bead, or with `--loop`/`--parallel`) |
+| `--orchestrator` | Launch orchestrator + C&C with 4 idle worker panes (explicit; same as default `abr`) |
 | `--bead <id>` | Work on a specific bead |
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
@@ -177,13 +181,15 @@ Override the config file location with `ABR_CONFIG` env var.
 
 When `--parallel-N` is used, a central orchestrator pane sits between the agent columns and shows a live colour-coded event feed. The bottom 4 lines of that pane are an interactive **Command & Control (C&C) prompt** (`abr> `).
 
-You can also start an idle orchestration workspace with:
+Running `abr` (with no flags) launches the orchestrator by default. You can also use `--orchestrator` explicitly:
 
 ```bash
+abr
+# or explicitly:
 abr --orchestrator
 ```
 
-This launches the orchestrator and C&C plus 4 worker panes in idle state (no agents started yet).
+This launches the orchestrator and C&C plus 4 worker panes in idle state (no agents started yet). Pass `--no-tui` to skip orchestrator mode.
 
 Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tmux pane IDs stored in `.abr-ipc/pane-A<n>`.
 
