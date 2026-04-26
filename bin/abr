@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.34"
+ABR_VERSION="0.2.35"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1127,7 +1127,8 @@ run_orchestrator() {
     printf '\e[1;36m╔══════════════════════════════════════════╗\e[0m\n'
     printf '\e[1;36m║  ABR Orchestrator  ·  %d worker(s)%-9s║\e[0m\n' "$num_workers" "${gum_flag}"
     printf '\e[1;36m╚══════════════════════════════════════════╝\e[0m\n'
-    printf '\e[90mWaiting for agents to start… (type \e[0m/help\e[90m in C&C below)\e[0m\n\n'
+    printf '\e[90mWaiting for agents to start… (type \e[0m/help\e[90m in C&C below)\e[0m\n'
+    printf '\e[90mLogs: /tmp/abr-%s/  (deleted on /exit — view with: less -R <file>)\e[0m\n\n' "${TMUX_SESSION}"
 
     # Wait up to 30s for the event log to appear (workers may not have started yet)
     local waited=0
@@ -1300,6 +1301,12 @@ cc_cmd_shutdown() {
     if [[ -z "$session" ]]; then
         printf '\e[31mNo tmux session detected for shutdown.\e[0m\n'
         return 1
+    fi
+    # Delete the session log directory (created at launch, in /tmp).
+    local log_dir="/tmp/abr-${session}"
+    if [[ -d "$log_dir" ]]; then
+        printf '%s|0|INFO|C&C: deleting session logs %s\n' "$ts" "$log_dir" >> "$log"
+        rm -rf "$log_dir"
     fi
     printf '%s|0|INFO|C&C: shutting down tmux session %s\n' "$ts" "$session" >> "$log"
     # This terminates orchestrator + all worker panes, returning to parent terminal.
@@ -1747,8 +1754,11 @@ cc_cmd_run() {
     # Clear any stale per-agent stop file so the new worker starts cleanly
     rm -f "${ipc_dir}/stop-A${idx}"
 
+    # Derive log dir from current session name (consistent with launch-time ABR_LOG_DIR)
+    local run_log_dir="/tmp/abr-$(tmux display-message -p '#{session_name}' 2>/dev/null || echo abr)"
+
     # $TMUX_PANE is evaluated by the shell in the new pane (deferred via \$)
-    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
+    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${run_log_dir}/agent-${target}.log'\"; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
     if tmux respawn-pane -k -t "$pane_id" "$new_cmd" 2>/dev/null; then
         printf '%s|0|INFO|C&C: respawned %s (%s)  →  abr %s\n' \
             "$(date +%H:%M:%S)" "$target" "$pane_id" "$flags" >> "$log"
@@ -2642,6 +2652,9 @@ launch_tmux() {
         echo "ABR_AGENT_IDX=$idx cd '$REPO_ROOT' && '$script_path' $flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read"
     }
 
+    # Per-session log directory in /tmp; deleted on /exit.
+    local ABR_LOG_DIR="/tmp/abr-${TMUX_SESSION}"
+
     # Build the array of worker commands
     local pane_cmds=()
     if [[ "$ORCHESTRATOR_MODE" == "true" ]]; then
@@ -2652,7 +2665,7 @@ launch_tmux() {
         local loop_flag="--loop"
         [[ "$LOOP_MAX" -gt 0 ]] && loop_flag="--loop-${LOOP_MAX}"
         for (( i=0; i<PARALLEL; i++ )); do
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' $loop_flag $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' $loop_flag $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
         done
     else
         # Non-loop: pre-assign one bead per pane
@@ -2675,7 +2688,7 @@ launch_tmux() {
 
         for (( i=0; i<total; i++ )); do
             local bead="${beads_to_run[$i]}"
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
         done
     fi
 
@@ -2701,6 +2714,7 @@ launch_tmux() {
 
     # New session: build orchestrator + worker layout and init the event log
     mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+    mkdir -p "${ABR_LOG_DIR}"
     > "${WORKTREE_BASE}/.abr-ipc/events.log"   # fresh log for this run
 
     local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total_workers"
@@ -2759,6 +2773,7 @@ launch_tmux() {
     log ""
     log "  Attach:  tmux attach -t $TMUX_SESSION"
     log "  Kill:    tmux kill-session -t $TMUX_SESSION"
+    log "  Logs:    ${ABR_LOG_DIR}/  (deleted on /exit)"
     log ""
 
     if [[ -z "${TMUX:-}" ]]; then
@@ -3570,9 +3585,10 @@ for p in agent_prs:
         [[ -n "$MODEL" ]] && review_agent_flags+=" --model '$MODEL'"
 
         # Build the worker pane commands
+        local ABR_LOG_DIR="/tmp/abr-${TMUX_SESSION}"
         local pane_cmds=()
         for (( i=0; i<total; i++ )); do
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
         done
 
         if [[ "$session_exists" == "true" ]]; then
@@ -3585,6 +3601,7 @@ for p in agent_prs:
         else
             # New session: orchestrator + review worker layout
             mkdir -p "${WORKTREE_BASE}/.abr-ipc"
+            mkdir -p "${ABR_LOG_DIR}"
             > "${WORKTREE_BASE}/.abr-ipc/events.log"
 
             local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total"
@@ -3627,6 +3644,7 @@ for p in agent_prs:
         log "Tmux session: $TMUX_SESSION ($total review pane(s))"
         log "  Attach:  tmux attach -t $TMUX_SESSION"
         log "  Kill:    tmux kill-session -t $TMUX_SESSION"
+        log "  Logs:    ${ABR_LOG_DIR}/  (deleted on /exit)"
 
         if [[ -z "${TMUX:-}" ]]; then
             exec tmux attach -t "$TMUX_SESSION"
