@@ -5,6 +5,7 @@ class Abr < Formula
   sha256 "PLACEHOLDER"
   license "MIT"
 
+  depends_on "beads"
   depends_on "git"
   depends_on "gum"
   depends_on "python@3"
