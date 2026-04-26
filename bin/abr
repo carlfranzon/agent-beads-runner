@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.25"
+ABR_VERSION="0.2.26"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1395,7 +1395,7 @@ _beads_board_section() {
         printf '%s|0|INFO|\e[90m    (none)\e[0m\n' "$ts"
     else
         local entry id title
-        for entry in "${items[@]}"; do
+        for entry in "${items[@]+"${items[@]}"}"; do
             if [[ "$entry" == "(timeout)" ]]; then
                 printf '%s|0|INFO|\e[90m    (timeout fetching beads)\e[0m\n' "$ts"
                 break
@@ -1442,10 +1442,10 @@ _run_beads_board() {
 
     {
         printf '%s|0|INFO|\e[1;37m════════════════ Beads Board ════════════════════════\e[0m\n' "$ts"
-        _beads_board_section '\e[33m' "OPEN BEADS"        '●' "$ts" "${open_arr[@]}"
-        _beads_board_section '\e[36m' "IN PROGRESS BEADS" '◎' "$ts" "${inprog_arr[@]}"
-        _beads_board_section '\e[32m' "CLOSED BEADS"      '✓' "$ts" "${closed_arr[@]}"
-        _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]}"
+        _beads_board_section '\e[33m' "OPEN BEADS"        '●' "$ts" "${open_arr[@]+"${open_arr[@]}"}" 
+        _beads_board_section '\e[36m' "IN PROGRESS BEADS" '◎' "$ts" "${inprog_arr[@]+"${inprog_arr[@]}"}" 
+        _beads_board_section '\e[32m' "CLOSED BEADS"      '✓' "$ts" "${closed_arr[@]+"${closed_arr[@]}"}" 
+        _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]+"${ready_arr[@]}"}" 
         printf '%s|0|INFO|\e[1;37m═════════════════════════════════════════════════════\e[0m\n' "$ts"
     } >> "$log"
 }
