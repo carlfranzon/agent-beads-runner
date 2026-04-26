@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.29"
+ABR_VERSION="0.2.30"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1139,7 +1139,7 @@ run_orchestrator() {
         return 1
     fi
 
-    local exit_count=0 claim_count=0 done_count=0 error_count=0 pr_count=0 session_num=0
+    local exit_count=0 claim_count=0 done_count=0 error_count=0 pr_count=0 merge_count=0 session_num=0
 
     # Use a FIFO so we can break cleanly from the read loop (subshell-free)
     local orch_fifo
@@ -1165,6 +1165,10 @@ run_orchestrator() {
             DONE)
                 (( done_count++ )) || true
                 printf '%s \e[32mDONE  \e[0m %s\n' "$label" "$msg" ;;
+            MERGE)
+                (( merge_count++ )) || true
+                (( done_count++ )) || true
+                printf '%s \e[32mMERGE \e[0m %s\n' "$label" "$msg" ;;
             ERROR)
                 (( error_count++ )) || true
                 printf '%s \e[31mERROR \e[0m %s\n' "$label" "$msg" ;;
@@ -1179,12 +1183,13 @@ run_orchestrator() {
                     printf '\n\e[1;36m════════ Session %d Summary ════════\e[0m\n' "$session_num"
                     [[ $claim_count -gt 0 ]] && printf '  Beads claimed:   %d\n' "$claim_count"
                     printf '  Items done:      %d\n' "$done_count"
-                    printf '  PRs created:     %d\n' "$pr_count"
+                    [[ $pr_count -gt 0 ]]    && printf '  PRs created:     %d\n' "$pr_count"
+                    [[ $merge_count -gt 0 ]] && printf '  PRs merged:      %d\n' "$merge_count"
                     [[ $error_count -gt 0 ]] && printf '\e[31m  Errors:          %d\e[0m\n' "$error_count" \
                                               || printf '  Errors:          0\n'
                     printf '\e[1;36m════════════════════════════════════\e[0m\n'
                     printf '\e[90m── Session %d done · Watching for next session (type \e[0m/exit\e[90m in C&C to quit) ──\e[0m\n\n' "$session_num"
-                    exit_count=0; claim_count=0; done_count=0; error_count=0; pr_count=0
+                    exit_count=0; claim_count=0; done_count=0; error_count=0; pr_count=0; merge_count=0
                 fi
                 ;;
             INFO)
@@ -3338,7 +3343,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                         bd_locked close "$bead_id" 2>/dev/null || true
                         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
-                        ipc_event "DONE" "PR #${pr_number} merged (after rebase)"
+                        ipc_event "MERGE" "PR #${pr_number} merged (after rebase)"
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
                         logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
@@ -3359,7 +3364,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 log "PR #${pr_number} merged and branch cleaned up."
                 bd_locked close "$bead_id" 2>/dev/null || true
                 [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
-                ipc_event "DONE" "PR #${pr_number} approved and merged"
+                ipc_event "MERGE" "PR #${pr_number} approved and merged"
             fi
             ;;
 
