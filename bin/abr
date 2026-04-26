@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.33"
+ABR_VERSION="0.2.34"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -3778,7 +3778,37 @@ main() {
     if [[ -n "$TARGET_BEAD" ]]; then
         bead_id="$TARGET_BEAD"
     else
+        # Pull first so we see claims written by parallel agents launched at the
+        # same time from C&C (/start with multiple agents, 1 loop each).
+        bd_locked dolt pull 2>/dev/null || true
+
         bead_id=$(pick_next_bead)
+
+        if [[ -n "$bead_id" ]]; then
+            # IPC pre-flight: skip if a local parallel pane already claimed this bead
+            # (written before dolt push completes, so visible immediately).
+            if ipc_is_claimed "$bead_id"; then
+                log "Bead $bead_id already claimed locally (IPC) — no unclaimed ready beads."
+                bead_id=""
+            else
+                # Worktree pre-flight: skip if another agent already created the tree.
+                local _branch_pre _wt_pre
+                _branch_pre=$(sanitize_branch "$bead_id")
+                _wt_pre="${WORKTREE_BASE}/${_branch_pre}"
+                if [[ -d "$_wt_pre" ]]; then
+                    log "Bead $bead_id worktree already exists — skipping."
+                    bead_id=""
+                elif ! claim_bead "$bead_id"; then
+                    # claim_bead() does: bd update --claim + dolt push + ipc_signal_pushed
+                    log "Bead $bead_id already claimed in DB — skipping."
+                    bead_id=""
+                else
+                    # Broadcast claim via IPC so other single-run panes starting up
+                    # at the same time skip this bead without waiting for dolt push.
+                    ipc_signal_claimed "$bead_id"
+                fi
+            fi
+        fi
     fi
 
     if [[ -z "$bead_id" ]]; then
@@ -3787,6 +3817,7 @@ main() {
     fi
 
     run_one_bead "$bead_id"
+    ipc_clear_claim "$bead_id"
     # Only emit EXIT when running standalone; loop children skip this because
     # run_loop() emits a single EXIT after all iterations complete.
     [[ "${ABR_LOOP_CHILD:-}" != "1" ]] && ipc_event "EXIT" "Worker done (single-bead mode)"
