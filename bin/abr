@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.27"
+ABR_VERSION="0.2.28"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1701,6 +1701,8 @@ cc_cmd_run() {
     local flags=""
     if [[ "$single_run" != "true" ]]; then
         flags="--loop"
+    else
+        flags="--no-tui"
     fi
     [[ -n "$agent" ]] && flags+=" --agent $agent"
     [[ -n "$model" ]] && flags+=" --model $model"
