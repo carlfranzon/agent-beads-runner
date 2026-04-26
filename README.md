@@ -204,6 +204,8 @@ Pane aliases (`A1`, `A2`, …) are assigned in launch order and map to actual tm
 
 Slash commands (new):
 
+Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listing all slash commands with descriptions. Arrow keys navigate; typing any characters narrows the list (fuzzy search); Enter selects and immediately executes the command. You can still type a full `/command` + Enter to skip the picker if you prefer.
+
 | Command | Effect |
 |---|---|
 | `/go` | Run a single agent on the next ready bead (uses defaults). |

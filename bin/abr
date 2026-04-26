@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.30"
+ABR_VERSION="0.2.31"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1222,14 +1222,37 @@ run_cc() {
     local w=0
     while [[ ! -f "$log" ]] && [[ $w -lt 20 ]]; do sleep 0.5; w=$((w+1)); done
 
-    printf '\e[90m─── C&C ready · type \e[0m/help\e[90m for commands ─────────\e[0m\n'
+    printf '\e[90m─── C&C ready · \e[0m/\e[90m = command picker · \e[0m/help\e[90m for list ──\e[0m\n'
     while true; do
         # Re-read worker count each iteration (may be expanded by /start)
         local num_workers
         num_workers=$(cat "$_nw_file" 2>/dev/null || echo "$initial_num_workers")
         cc_render_status_bar "$ipc_dir" "$num_workers" || true
         printf '\e[1;36mabr>\e[0m '
-        IFS= read -r cmdline || break
+        # Read just the first character; "/" opens the interactive command picker
+        IFS= read -rn1 first_char || break
+        if [[ "$first_char" == "/" ]]; then
+            printf '\n'
+            cmdline=$(printf '%s\n' \
+                "/go      Run one agent on next bead" \
+                "/start   Interactive launch wizard" \
+                "/agent   Pick and persist default agent" \
+                "/model   Pick and persist default model" \
+                "/beads   Show kanban-style bead board" \
+                "/bead    Pick bead then action menu" \
+                "/prune   Prune merged local/remote branches" \
+                "/review  Run one review agent on open PRs" \
+                "/help    Print command help to dashboard" \
+                "/exit    Kill tmux session and return" \
+                | gum filter --placeholder "type to filter commands…" \
+                              --height 4 --select-if-one 2>/dev/null) || continue
+            cmdline="${cmdline%% *}"  # strip description, keep /command
+        elif [[ -z "$first_char" ]]; then
+            continue
+        else
+            IFS= read -r rest
+            cmdline="${first_char}${rest}"
+        fi
         [[ -z "$cmdline" ]] && continue
         local -a words
         read -ra words <<< "$cmdline"
