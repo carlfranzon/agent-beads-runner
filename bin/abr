@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.32"
+ABR_VERSION="0.2.33"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1233,6 +1233,10 @@ run_cc() {
         IFS= read -rn1 first_char || break
         if [[ "$first_char" == "/" ]]; then
             printf '\n'
+            # Temporarily expand the C&C pane so gum filter has room to render,
+            # then restore it to 4 lines after selection (or on cancel).
+            local _pane_id; _pane_id=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+            [[ -n "$_pane_id" ]] && tmux resize-pane -t "$_pane_id" -y 14
             cmdline=$(printf '%s\n' \
                 "/go      Run one agent on next bead" \
                 "/start   Interactive launch wizard" \
@@ -1245,7 +1249,10 @@ run_cc() {
                 "/help    Print command help to dashboard" \
                 "/exit    Kill tmux session and return" \
                 | gum filter --placeholder "type to filter commands…" \
-                              --height 10 --select-if-one) || continue
+                              --height 12 --select-if-one)
+            local _pick_rc=$?
+            [[ -n "$_pane_id" ]] && tmux resize-pane -t "$_pane_id" -y 4
+            [[ $_pick_rc -ne 0 ]] && continue
             cmdline="${cmdline%% *}"  # strip description, keep /command
         elif [[ -z "$first_char" ]]; then
             continue
