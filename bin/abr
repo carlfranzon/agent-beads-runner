@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.0"
+ABR_VERSION="0.3.1"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2538,7 +2538,10 @@ run_loop() {
         # Re-invoke this script as a subprocess — completely fresh session.
         # ABR_LOOP_CHILD=1 tells the child not to emit an EXIT event; the
         # parent run_loop() emits a single EXIT when the whole loop is done.
-        local loop_invoke_flags=(--bead "$bead_id" --agent "$AGENT_TOOL")
+        # --no-tui is required: without it the auto-enable guard in main() fires
+        # (LOOP_MODE/PARALLEL/ORCHESTRATOR_MODE are all false in the child)
+        # and the child tries to create a brand-new tmux orchestrator session.
+        local loop_invoke_flags=(--no-tui --bead "$bead_id" --agent "$AGENT_TOOL")
         [[ -n "$MODEL" ]] && loop_invoke_flags+=(--model "$MODEL")
         local child_exit=0
         ABR_LOOP_CHILD=1 "$script_path" "${loop_invoke_flags[@]}" || child_exit=$?
@@ -2658,7 +2661,7 @@ launch_tmux() {
 
         for (( i=0; i<total; i++ )); do
             local bead="${beads_to_run[$i]}"
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --no-tui --bead '$bead' $agent_model_flags; echo ''; echo '=== Pane finished. Press Enter to close ==='; read")
         done
     fi
 
