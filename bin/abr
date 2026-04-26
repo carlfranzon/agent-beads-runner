@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.26"
+ABR_VERSION="0.2.27"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2669,9 +2669,13 @@ launch_tmux() {
     local orch_cmd="cd '$REPO_ROOT' && '$script_path' --internal-orchestrator $total_workers"
     log "Creating tmux session '$TMUX_SESSION' with orchestrator + $total_workers worker pane(s)..."
 
+    # Use the actual terminal width so the session fills the screen.
+    local total_cols
+    total_cols=$(tput cols 2>/dev/null || echo 220)
+
     # Build layout around a stable pane ID.
     # Start the session with orchestrator command directly so the first pane stays alive.
-    tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+    tmux new-session -d -s "$TMUX_SESSION" -x "$total_cols" -y 50 "$orch_cmd"
     tmux rename-window -t "$TMUX_SESSION" "agents"
     local center_pane
     center_pane=$(tmux list-panes -t "$TMUX_SESSION" -F '#{pane_id}' | head -n1)
@@ -2680,7 +2684,7 @@ launch_tmux() {
         # Layout: orchestrator top, agent bottom
         tmux split-window -v -t "$center_pane" "${pane_cmds[0]}"
     else
-        # Layout: left column | orchestrator (center, full-height) | right column
+        # Layout: left column | orchestrator (center, 250 cols) | right column
         # left gets floor(N/2) agents, right gets ceil(N/2) agents
         local left_total=$(( total_workers / 2 ))
         local right_total=$(( total_workers - left_total ))
@@ -2690,8 +2694,9 @@ launch_tmux() {
         left_root=$(tmux split-window -h -b -P -F '#{pane_id}' -t "$center_pane" "${pane_cmds[0]}")
         right_root=$(tmux split-window -h -P -F '#{pane_id}' -t "$center_pane" "${pane_cmds[$left_total]}")
 
-        # Equalize the three main columns.
+        # Equalize the three main columns, then pin center to 250 cols.
         tmux select-layout -t "$TMUX_SESSION" even-horizontal
+        tmux resize-pane -x 250 -t "$center_pane"
 
         # Fill left column by splitting downward from the current tail pane.
         local left_tail="$left_root"
@@ -3549,18 +3554,23 @@ for p in agent_prs:
             log "Creating tmux session '$TMUX_SESSION' with orchestrator + $total review pane(s)..."
 
             if [[ $total -eq 1 ]]; then
-                tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+                local total_cols; total_cols=$(tput cols 2>/dev/null || echo 220)
+                tmux new-session -d -s "$TMUX_SESSION" -x "$total_cols" -y 50 "$orch_cmd"
                 tmux rename-window -t "$TMUX_SESSION" "reviews"
                 tmux split-window -v -t "$TMUX_SESSION" "${pane_cmds[0]}"
             else
                 local left_total=$(( total / 2 ))
                 local right_total=$(( total - left_total ))
 
-                tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50 "$orch_cmd"
+                local total_cols; total_cols=$(tput cols 2>/dev/null || echo 220)
+                tmux new-session -d -s "$TMUX_SESSION" -x "$total_cols" -y 50 "$orch_cmd"
                 tmux rename-window -t "$TMUX_SESSION" "reviews"
+                local review_center
+                review_center=$(tmux list-panes -t "$TMUX_SESSION" -F '#{pane_id}' | head -n1)
                 tmux split-window -h -b -t "$TMUX_SESSION" "${pane_cmds[0]}"
                 tmux split-window -h -t "$TMUX_SESSION:0.1" "${pane_cmds[$left_total]}"
                 tmux select-layout -t "$TMUX_SESSION" even-horizontal
+                tmux resize-pane -x 250 -t "$review_center"
 
                 local left_tail=0
                 for (( i=1; i<left_total; i++ )); do
