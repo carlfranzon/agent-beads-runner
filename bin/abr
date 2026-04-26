@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.24"
+ABR_VERSION="0.2.25"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -770,6 +770,24 @@ for issue in data:
 '
 }
 
+# Like _parse_bead_ids_from_json but outputs "id<TAB>title" per bead.
+_parse_bead_titles_from_json() {
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    data = data.get("issues", [])
+for issue in data:
+    bid = issue.get("id", "")
+    title = issue.get("title", "")
+    if bid:
+        print(bid + "\t" + title)
+'
+}
+
 get_bead_ids_for_status() {
     local status="$1"
     local -a bd_args
@@ -808,6 +826,34 @@ get_bead_ids_for_status_timed() {
         ticks=$((ticks - 1))
     done
 
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$tmp"
+    return 124
+}
+
+# Like get_bead_ids_for_status_timed but outputs "id<TAB>title" pairs.
+# Returns 0 on success, 124 on timeout.
+get_beads_with_titles_timed() {
+    local status="$1"
+    local timeout_s="${2:-5}"
+    local -a bd_args
+    read -r -a bd_args <<< "$(_bd_args_for_status "$status")"
+    local tmp
+    tmp=$(mktemp)
+    (bd "${bd_args[@]}" 2>/dev/null | _parse_bead_titles_from_json > "$tmp") &
+    local pid=$!
+    local ticks=$((timeout_s * 10))
+    while [[ $ticks -gt 0 ]]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            cat "$tmp"
+            rm -f "$tmp"
+            return 0
+        fi
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     rm -f "$tmp"
@@ -1334,8 +1380,34 @@ cc_cmd_slash_model() {
     printf '\e[32mDefault model set to %s\e[0m\n' "$selected"
 }
 
-# Build a fixed-width kanban column string (box-drawing, no external tools)
-# Fetches all bead statuses and writes a plain-text kanban board to the event log.
+# Emit one status-group section as INFO lines to stdout (caller redirects to log).
+# Args: <color-escape> <label> <bullet> <ts> [bead-entry…]
+# Each bead-entry is "id<TAB>title" (from get_beads_with_titles_timed).
+_beads_board_section() {
+    local color="$1" label="$2" bullet="$3" ts="$4"
+    shift 4
+    local -a items=("$@")
+    local count="${#items[@]}"
+    [[ "${items[0]:-}" == "(timeout)" ]] && count="?"
+    printf '%s|0|INFO|%b── %s (%s) ──────────────────────────────────────\e[0m\n' \
+        "$ts" "$color" "$label" "$count"
+    if [[ ${#items[@]} -eq 0 ]]; then
+        printf '%s|0|INFO|\e[90m    (none)\e[0m\n' "$ts"
+    else
+        local entry id title
+        for entry in "${items[@]}"; do
+            if [[ "$entry" == "(timeout)" ]]; then
+                printf '%s|0|INFO|\e[90m    (timeout fetching beads)\e[0m\n' "$ts"
+                break
+            fi
+            IFS=$'\t' read -r id title <<< "$entry"
+            [[ ${#title} -gt 52 ]] && title="${title:0:50}…"
+            printf '%s|0|INFO|%b  %s \e[0m%-24s  %s\n' "$ts" "$color" "$bullet" "$id" "$title"
+        done
+    fi
+}
+
+# Fetches all bead statuses and writes a pretty kanban board to the event log.
 # Designed to run as a subprocess (abr --internal-beads-board <log>) so that the
 # C&C prompt stays responsive while bd queries execute.
 _run_beads_board() {
@@ -1344,37 +1416,37 @@ _run_beads_board() {
     local -a ready_arr open_arr inprog_arr closed_arr
     local out
 
-    if out=$(get_bead_ids_for_status_timed "ready" 5); then
-        while IFS= read -r b; do [[ -n "$b" ]] && ready_arr+=("$b"); done <<< "$out"
-    else
-        ready_arr=("(timeout)")
-    fi
-
-    if out=$(get_bead_ids_for_status_timed "open" 5); then
+    if out=$(get_beads_with_titles_timed "open" 5); then
         while IFS= read -r b; do [[ -n "$b" ]] && open_arr+=("$b"); done <<< "$out"
     else
         open_arr=("(timeout)")
     fi
 
-    if out=$(get_bead_ids_for_status_timed "in-progress" 5); then
+    if out=$(get_beads_with_titles_timed "in-progress" 5); then
         while IFS= read -r b; do [[ -n "$b" ]] && inprog_arr+=("$b"); done <<< "$out"
     else
         inprog_arr=("(timeout)")
     fi
 
-    if out=$(get_bead_ids_for_status_timed "closed" 5); then
+    if out=$(get_beads_with_titles_timed "closed" 5); then
         while IFS= read -r b; do [[ -n "$b" ]] && closed_arr+=("$b"); done <<< "$out"
     else
         closed_arr=("(timeout)")
     fi
 
+    if out=$(get_beads_with_titles_timed "ready" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && ready_arr+=("$b"); done <<< "$out"
+    else
+        ready_arr=("(timeout)")
+    fi
+
     {
-        printf '%s|0|INFO|══════════ Beads Board ══════════════════════════════\n' "$ts"
-        printf '%s|0|INFO|  READY       (%d):  %s\n' "$ts" "${#ready_arr[@]}" "${ready_arr[*]:-(none)}"
-        printf '%s|0|INFO|  OPEN        (%d):  %s\n' "$ts" "${#open_arr[@]}"  "${open_arr[*]:-(none)}"
-        printf '%s|0|INFO|  IN-PROGRESS (%d):  %s\n' "$ts" "${#inprog_arr[@]}" "${inprog_arr[*]:-(none)}"
-        printf '%s|0|INFO|  CLOSED      (%d):  %s\n' "$ts" "${#closed_arr[@]}" "${closed_arr[*]:-(none)}"
-        printf '%s|0|INFO|════════════════════════════════════════════════════\n' "$ts"
+        printf '%s|0|INFO|\e[1;37m════════════════ Beads Board ════════════════════════\e[0m\n' "$ts"
+        _beads_board_section '\e[33m' "OPEN BEADS"        '●' "$ts" "${open_arr[@]}"
+        _beads_board_section '\e[36m' "IN PROGRESS BEADS" '◎' "$ts" "${inprog_arr[@]}"
+        _beads_board_section '\e[32m' "CLOSED BEADS"      '✓' "$ts" "${closed_arr[@]}"
+        _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]}"
+        printf '%s|0|INFO|\e[1;37m═════════════════════════════════════════════════════\e[0m\n' "$ts"
     } >> "$log"
 }
 
