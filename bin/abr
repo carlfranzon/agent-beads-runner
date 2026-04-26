@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.28"
+ABR_VERSION="0.2.29"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1179,7 +1179,7 @@ run_orchestrator() {
                     printf '\n\e[1;36m════════ Session %d Summary ════════\e[0m\n' "$session_num"
                     [[ $claim_count -gt 0 ]] && printf '  Beads claimed:   %d\n' "$claim_count"
                     printf '  Items done:      %d\n' "$done_count"
-                    printf '  PRs merged:      %d\n' "$pr_count"
+                    printf '  PRs created:     %d\n' "$pr_count"
                     [[ $error_count -gt 0 ]] && printf '\e[31m  Errors:          %d\e[0m\n' "$error_count" \
                                               || printf '  Errors:          0\n'
                     printf '\e[1;36m════════════════════════════════════\e[0m\n'
