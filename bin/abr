@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.2.31"
+ABR_VERSION="0.2.32"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1245,7 +1245,7 @@ run_cc() {
                 "/help    Print command help to dashboard" \
                 "/exit    Kill tmux session and return" \
                 | gum filter --placeholder "type to filter commands…" \
-                              --height 4 --select-if-one 2>/dev/null) || continue
+                              --height 10 --select-if-one) || continue
             cmdline="${cmdline%% *}"  # strip description, keep /command
         elif [[ -z "$first_char" ]]; then
             continue
