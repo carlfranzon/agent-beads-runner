@@ -32,7 +32,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Interactive launch wizard (slash) | `/start` |
 | Set default agent (slash) | `/agent` |
 | Set default model (slash) | `/model` |
-| Show bead board (slash) | `/beads` |
+| Show bead board (slash) | `/beads` — OPEN, IN PROGRESS, CLOSED, READY, BLOCKED sections |
 | Bead action menu (slash) | `/bead` |
 | Prune merged branches (slash) | `/prune` |
 | Review open agent PRs (slash) | `/review` |

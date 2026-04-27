@@ -212,7 +212,7 @@ Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listi
 | `/start` | Interactive launch flow (work target, agents, loops, agent, model, confirm). |
 | `/agent` | Select and persist default agent to `.abr.conf`. |
 | `/model` | Select and persist default model to `.abr.conf`. |
-| `/beads` | Show kanban-style grouped bead board in dashboard. |
+| `/beads` | Show kanban-style grouped bead board in dashboard (OPEN, IN PROGRESS, CLOSED, READY, BLOCKED sections). |
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
 | `/prune` | Interactively prune merged local, remote, or both branch sets. |
 | `/review` | Run a single review agent on open agent PRs (uses current agent/model defaults). |
@@ -260,6 +260,33 @@ The review agent uses a **bead-scoped lint policy** to avoid blocking on pre-exi
 - Separates lint hygiene (per-bead) from lint debt cleanup (separate epic)
 
 For managing accumulated lint debt, create a dedicated lint-reduction bead/epic. When baseline reaches 0, restore full-repo lint as a hard gate.
+
+## Bead Board (`/beads`)
+
+The `/beads` command renders a live kanban board in the orchestrator dashboard with five sections:
+
+| Section | Colour | What it shows |
+|---------|--------|---------------|
+| OPEN BEADS | Yellow | Beads in the backlog (status = `open`) |
+| IN PROGRESS BEADS | Cyan | Beads actively being worked (status = `in_progress`) |
+| CLOSED BEADS | Green | Completed beads (status = `closed`) |
+| READY BEADS | Blue | Beads with no blockers — agents will pick from here |
+| BLOCKED BEADS | Magenta | Beads whose dependencies are not yet met (`bd list --status blocked`) |
+
+`bd ready` is blocker-aware and already excludes blocked beads from `pick_next_bead()`. The BLOCKED section exists purely for visibility on the board.
+
+## PR Rejection & Attempt Counter
+
+When the review agent rejects a PR, abr:
+
+1. Posts a review comment with the issues found
+2. Creates a **child bead** titled `"Fix review issues for <id> [attempt N]"`  
+   - First rejection → `[attempt 2]`; second rejection (child of child) → `[attempt 3]`, etc.
+3. Closes the parent bead (work tracked in child)
+4. **Deletes the remote `agent/*` branch** (same cleanup as approve path)
+5. Closes the PR
+
+The `[attempt N]` counter is derived from the parent bead's title — if the parent already has `[attempt K]` in its title the child gets `[attempt K+1]`.
 
 ## License
 

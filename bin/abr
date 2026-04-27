@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.2"
+ABR_VERSION="0.3.3"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -756,6 +756,7 @@ _bd_args_for_status() {
         ready)       echo "ready --json" ;;
         in-progress) echo "list --status in_progress --json" ;;
         closed)      echo "list --status closed --json --all" ;;
+        blocked)     echo "list --status blocked --json" ;;
         *)           echo "list --status $status --json" ;;
     esac
 }
@@ -1475,7 +1476,7 @@ _beads_board_section() {
 _run_beads_board() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
-    local -a ready_arr open_arr inprog_arr closed_arr
+    local -a ready_arr open_arr inprog_arr closed_arr blocked_arr
     local out
 
     if out=$(get_beads_with_titles_timed "open" 5); then
@@ -1502,12 +1503,19 @@ _run_beads_board() {
         ready_arr=("(timeout)")
     fi
 
+    if out=$(get_beads_with_titles_timed "blocked" 5); then
+        while IFS= read -r b; do [[ -n "$b" ]] && blocked_arr+=("$b"); done <<< "$out"
+    else
+        blocked_arr=("(timeout)")
+    fi
+
     {
         printf '%s|0|INFO|\e[1;37m════════════════ Beads Board ════════════════════════\e[0m\n' "$ts"
-        _beads_board_section '\e[33m' "OPEN BEADS"        '●' "$ts" "${open_arr[@]+"${open_arr[@]}"}" 
+        _beads_board_section '\e[33m' "OPEN BEADS"        '●' "$ts" "${open_arr[@]+"${open_arr[@]}"}"
         _beads_board_section '\e[36m' "IN PROGRESS BEADS" '◎' "$ts" "${inprog_arr[@]+"${inprog_arr[@]}"}" 
-        _beads_board_section '\e[32m' "CLOSED BEADS"      '✓' "$ts" "${closed_arr[@]+"${closed_arr[@]}"}" 
-        _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]+"${ready_arr[@]}"}" 
+        _beads_board_section '\e[32m' "CLOSED BEADS"      '✓' "$ts" "${closed_arr[@]+"${closed_arr[@]}"}"
+        _beads_board_section '\e[34m' "READY BEADS"       '▶' "$ts" "${ready_arr[@]+"${ready_arr[@]}"}"
+        _beads_board_section '\e[35m' "BLOCKED BEADS"     '⊘' "$ts" "${blocked_arr[@]+"${blocked_arr[@]}"}"
         printf '%s|0|INFO|\e[1;37m═════════════════════════════════════════════════════\e[0m\n' "$ts"
     } >> "$log"
 }
@@ -3416,7 +3424,16 @@ for i, issue in enumerate(data.get('issues', []), 1):
             if [[ -n "$issues" ]]; then
                 local fix_desc="Fix issues from PR #${pr_number} review for ${bead_id}:\n${issues}"
                 local create_out
-                create_out=$(bd_locked create --title "Fix review issues for ${bead_id}" \
+                # Determine attempt number for child bead title
+                local attempt_num=2
+                local bead_title_for_attempt=""
+                bead_title_for_attempt=$(bd_locked show "$bead_id" --json 2>/dev/null \
+                    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))" 2>/dev/null || echo "")
+                if [[ "$bead_title_for_attempt" =~ \[attempt\ ([0-9]+)\] ]]; then
+                    attempt_num=$(( ${BASH_REMATCH[1]} + 1 ))
+                fi
+                local child_title="Fix review issues for ${bead_id} [attempt ${attempt_num}]"
+                create_out=$(bd_locked create --title "$child_title" \
                     --description "$(printf '%b' "$fix_desc")" \
                     --parent "$bead_id" \
                     --priority 1 2>&1)
@@ -3440,6 +3457,8 @@ for i, issue in enumerate(data.get('issues', []), 1):
             gh pr close "$pr_number" --comment "Closed by automated review. See review comment for details." \
                 2>&1 | while read -r line; do log "  $line"; done
             log "PR #${pr_number} closed."
+            git push origin --delete "$branch" 2>/dev/null || true
+            log "Deleted remote branch $branch."
             ;;
 
         *)
@@ -3455,7 +3474,16 @@ for i, issue in enumerate(data.get('issues', []), 1):
             # Create a follow-up bead to investigate and fix
             local unknown_fix_desc="PR #${pr_number} for ${bead_id} was closed because the review agent produced an unrecognized verdict.\nRaw verdict file:\n${raw_verdict}\n\nInvestigate the issue and re-run the agent or fix manually."
             local create_out_unk
-            create_out_unk=$(bd_locked create --title "Fix review parse failure for ${bead_id}" \
+            # Determine attempt number for child bead title
+            local attempt_num_unk=2
+            local bead_title_for_attempt_unk=""
+            bead_title_for_attempt_unk=$(bd_locked show "$bead_id" --json 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))" 2>/dev/null || echo "")
+            if [[ "$bead_title_for_attempt_unk" =~ \[attempt\ ([0-9]+)\] ]]; then
+                attempt_num_unk=$(( ${BASH_REMATCH[1]} + 1 ))
+            fi
+            local child_title_unk="Fix review parse failure for ${bead_id} [attempt ${attempt_num_unk}]"
+            create_out_unk=$(bd_locked create --title "$child_title_unk" \
                 --description "$(printf '%b' "$unknown_fix_desc")" \
                 --parent "$bead_id" \
                 --priority 1 2>&1)
@@ -3479,6 +3507,8 @@ for i, issue in enumerate(data.get('issues', []), 1):
             gh pr close "$pr_number" --comment "Closed by automated review (unreadable verdict). See review comment for raw output." \
                 2>&1 | while read -r line; do log "  $line"; done
             log "PR #${pr_number} closed (unknown verdict)."
+            git push origin --delete "$branch" 2>/dev/null || true
+            log "Deleted remote branch $branch."
             ;;
     esac
 
