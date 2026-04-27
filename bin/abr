@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.3"
+ABR_VERSION="0.3.4"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2157,6 +2157,7 @@ cleanup_worktree() {
     local wt_path="$1"
     local branch="${2:-}"
     local pr_local_ref="${3:-}"
+    local agent_pr_ref="${4:-}"
     if [[ -d "$wt_path" ]]; then
         log "Cleaning up worktree: $wt_path"
         cd "$REPO_ROOT"
@@ -2176,6 +2177,11 @@ cleanup_worktree() {
     # Clean up any locally-fetched PR review ref (pull/N/head fetched for fork PRs)
     if [[ -n "$pr_local_ref" ]] && git show-ref --verify --quiet "refs/heads/$pr_local_ref"; then
         git branch -D "$pr_local_ref" 2>/dev/null && log "Deleted PR review ref: $pr_local_ref" || true
+    fi
+
+    # Clean up any pr-N branch the review agent created inside the worktree
+    if [[ -n "$agent_pr_ref" ]] && git show-ref --verify --quiet "refs/heads/$agent_pr_ref"; then
+        git branch -D "$agent_pr_ref" 2>/dev/null && log "Deleted agent PR ref: $agent_pr_ref" || true
     fi
 }
 
@@ -3138,6 +3144,8 @@ for f in files:
 
     # Prefer origin/<branch> (same-repo PRs); fall back to pull/N/head (fork PRs)
     local pr_local_ref=""
+    # pr-N branch that the review agent may create inside the worktree
+    local agent_pr_ref="pr-${pr_number}"
     if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
         git worktree add "$wt_path" "origin/$branch" --detach 2>&1 | while read -r line; do log "  $line"; done
     else
@@ -3150,7 +3158,7 @@ for f in files:
     copy_env_files "$wt_path"
     install_deps "$wt_path"
 
-    trap "cleanup_worktree '$wt_path' '$branch' '$pr_local_ref'" EXIT
+    trap "cleanup_worktree '$wt_path' '$branch' '$pr_local_ref' '$agent_pr_ref'" EXIT
 
     # Build and run the review agent
     local prompt
@@ -3199,7 +3207,7 @@ for f in files:
         logr "Manual review required."
         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "NO_VERDICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
         trap - EXIT
-        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
+        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
         return 1
     fi
 
@@ -3376,7 +3384,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
                     if [[ $retry_rc -eq 0 ]] && ! echo "$retry_output" | grep -qi "conflict\|not possible\|could not merge\|can't be merged"; then
                         git push origin --delete "$branch" 2>/dev/null || true
-                        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
+                        cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                         bd_locked close "$bead_id" 2>/dev/null || true
                         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
@@ -3397,7 +3405,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
             else
                 # Merge succeeded — clean up remote branch
                 git push origin --delete "$branch" 2>/dev/null || true
-                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
+                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
                 log "PR #${pr_number} merged and branch cleaned up."
                 bd_locked close "$bead_id" 2>/dev/null || true
                 [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
@@ -3514,7 +3522,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
     rm -f "$verdict_file"
     trap - EXIT
-    cleanup_worktree "$wt_path" "$branch" "$pr_local_ref"
+    cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
 }
 
 run_review() {
