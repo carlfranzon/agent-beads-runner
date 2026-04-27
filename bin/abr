@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.7"
+ABR_VERSION="0.3.8"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2261,6 +2261,23 @@ cleanup_worktree() {
     if [[ -n "$agent_pr_ref" ]] && git show-ref --verify --quiet "refs/heads/$agent_pr_ref"; then
         git branch -D "$agent_pr_ref" 2>/dev/null && log "Deleted agent PR ref: $agent_pr_ref" || true
     fi
+
+    # Clean up stale remote-tracking refs the review agent may have created via ad-hoc
+    # git fetch (e.g. refs/remotes/origin/pr/N or refs/remotes/pull/N/head).
+    # These are local-only refs; git update-ref -d removes them without touching the remote.
+    if [[ -n "$agent_pr_ref" ]]; then
+        local _pr_num="${agent_pr_ref#pr-}"
+        local _tracking_ref
+        for _tracking_ref in \
+                "refs/remotes/origin/pr/${_pr_num}" \
+                "refs/remotes/origin/pr-${_pr_num}" \
+                "refs/remotes/pull/${_pr_num}/head"; do
+            if git show-ref --verify --quiet "$_tracking_ref" 2>/dev/null; then
+                git update-ref -d "$_tracking_ref" 2>/dev/null \
+                    && log "Deleted stale tracking ref: ${_tracking_ref}" || true
+            fi
+        done
+    fi
 }
 
 prune_local_branches() {
@@ -2334,11 +2351,20 @@ prune_remote_branches() {
     remote_agent_branches=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/agent | sed 's#^origin/##')
     remote_pr_branches=$(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/pr' | sed 's#^origin/##')
 
-    if [[ -z "$remote_agent_branches" && -z "$remote_pr_branches" ]]; then
-        log "No remote agent/* or pr/* branches found on origin."
+    # Stale pull/N/head tracking refs (created by review agent or gh pr checkout).
+    # Only collect them when there is no actual remote named 'pull' — if a 'pull' remote
+    # exists, git fetch --prune handles its own refs.
+    local stale_pull_refs=""
+    if ! git remote | grep -qx 'pull' 2>/dev/null; then
+        stale_pull_refs=$(git for-each-ref --format='%(refname)' 'refs/remotes/pull' 2>/dev/null)
+    fi
+
+    if [[ -z "$remote_agent_branches" && -z "$remote_pr_branches" && -z "$stale_pull_refs" ]]; then
+        log "No remote agent/*, pr/*, or stale pull/* refs found on origin."
         return 0
     fi
 
+    if [[ -n "$remote_agent_branches" || -n "$remote_pr_branches" ]]; then
     log "Pruning merged remote agent/* and pr/* branches against origin/${default_branch}..."
     local branch
     while IFS= read -r branch; do
@@ -2352,8 +2378,12 @@ prune_remote_branches() {
             elif git push origin --delete "$branch" &>/dev/null; then
                 log "Deleted remote branch: $branch"
                 deleted=$((deleted + 1))
+            elif git update-ref -d "refs/remotes/origin/$branch" 2>/dev/null; then
+                # Ref was a local tracking ref (not an actual remote branch) — remove it locally
+                log "Deleted stale tracking ref: refs/remotes/origin/$branch"
+                deleted=$((deleted + 1))
             else
-                log "Could not delete remote branch: $branch"
+                log "Could not delete remote branch or tracking ref: $branch"
                 failed=$((failed + 1))
             fi
         else
@@ -2361,6 +2391,26 @@ prune_remote_branches() {
             kept=$((kept + 1))
         fi
     done <<< "$(printf '%s\n' $remote_agent_branches $remote_pr_branches)"
+    fi
+
+    # Clean up stale refs/remotes/pull/N/head tracking refs (no 'pull' remote configured)
+    if [[ -n "$stale_pull_refs" ]]; then
+        log "Cleaning up stale refs/remotes/pull/* tracking refs..."
+        local _pull_ref
+        while IFS= read -r _pull_ref; do
+            [[ -z "$_pull_ref" ]] && continue
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log "[DRY RUN] Would delete stale tracking ref: $_pull_ref"
+                deleted=$((deleted + 1))
+            elif git update-ref -d "$_pull_ref" 2>/dev/null; then
+                log "Deleted stale tracking ref: $_pull_ref"
+                deleted=$((deleted + 1))
+            else
+                log "Could not delete tracking ref: $_pull_ref"
+                failed=$((failed + 1))
+            fi
+        done <<< "$stale_pull_refs"
+    fi
 
     log "Remote prune complete. Deleted: $deleted  Kept: $kept  Failed: $failed"
 }
@@ -2956,7 +3006,7 @@ ${comments_section}
    - Save this count — we'll compare after the PR changes
 
 2. Check out the PR branch:
-   - \`git checkout origin/refs/pull/${pr_number}/head || git show-branch\` 
+   - \`git fetch origin refs/pull/${pr_number}/head:pr-${pr_number} 2>/dev/null; git checkout pr-${pr_number}\`
    - Run the same quality commands again
    - Compare: Are there NEW errors in files changed by this PR? Is the TOTAL error count higher?
 
