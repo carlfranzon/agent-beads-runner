@@ -136,6 +136,7 @@ abr --set-default-model sonnet46-h
 | `--install-skill` | Install abr skill to AI agent platforms (interactive) |
 | `--set-default-agent` | Configures your default agent interactively |
 | `--set-default-model` | Configures your default model interactively |
+| `--show-log` | Print JSONL session trace log to stdout (pipe to `jq` for filtering) |
 | `--dry-run` | Show what would happen without executing |
 | `--version`, `-V` | Show version |
 | `-h`, `--help` | Show help |
@@ -167,8 +168,51 @@ Precedence: `--flag` > environment variable > workspace config > global config >
 | `model` | *(per-agent)* | Default model short name |
 | `copilot_cli` | `copilot` | Path to Copilot CLI binary |
 | `tmux_session` | `abr-<repo>` | tmux session name |
+| `prompt_file` | *(unset)* | Override workspace prompt file path |
 
 Override the config file location with `ABR_CONFIG` env var.
+
+## Per-Project Prompt Customization
+
+Create a file in your repo to append project-specific instructions to every agent invocation:
+
+- **`.abr/prompt.md`** — repo-level instructions appended to every agent prompt
+- **`~/.config/abr/prompt.md`** — global instructions appended to all repos (loaded first)
+- **`prompt_file = <path>`** in `.abr.conf` — override the workspace prompt file path
+
+Both files are appended after the standard prompt under a `## Project-Specific Instructions` heading. When neither exists, agent prompts are unchanged.
+
+Good uses: coding conventions, test requirements, architecture rules, security requirements, tool preferences specific to the project.
+
+The review agent (`--review`) also picks up these files under a `## Project-Specific Review Instructions` heading, making it easy to add custom review criteria (e.g. "always reject if migration files are missing").
+
+## Session Trace Logs (JSONL)
+
+Every agent session writes a structured newline-delimited JSON trace to `/tmp/abr-<session>/session.jsonl` alongside the existing per-pane logs.
+
+```json
+{"ts":"2026-04-27T14:32:01Z","session":"abr-myrepo","pane":"A2","agent":"claude","bead":"abc-1","level":"DONE","msg":"Bead abc-1 finished"}
+```
+
+Fields: `ts` (ISO-8601 UTC), `session`, `pane`, `agent`, `bead`, `level`, `msg`.
+
+Event levels: `CLAIM`, `START`, `PR`, `DONE`, `MERGE`, `ERROR`, `EXIT`, `INFO`.
+
+Access:
+
+```bash
+# Print the log
+abr --show-log
+
+# Filter with jq
+abr --show-log | jq 'select(.level=="ERROR")'
+abr --show-log | jq 'select(.bead=="abc-1")'
+
+# Or directly
+cat /tmp/abr-abr-myrepo/session.jsonl | jq .
+```
+
+Logs are deleted when you run `/exit` from the C&C prompt.
 
 ## Graceful Stop (loop mode)
 

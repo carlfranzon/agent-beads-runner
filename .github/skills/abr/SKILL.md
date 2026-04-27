@@ -53,6 +53,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Install skill for AI agents | `abr --install-skill` |
 | Setup default agent | `abr --set-default-agent <tool>` |
 | Setup default model | `abr --set-default-model <model>` |
+| Print session trace log | `abr --show-log` |
 
 ## Agents
 
@@ -155,6 +156,30 @@ Precedence: `--flag` > env var > workspace config > global config > built-in def
 | `model` | *(per-agent)* | Default model short name |
 | `copilot_cli` | `copilot` | Path to Copilot CLI binary |
 | `tmux_session` | `abr-<repo>` | tmux session name |
+| `prompt_file` | *(unset)* | Override workspace prompt file path |
+
+## Per-Project Prompt Customization
+
+Add project-specific instructions to every agent invocation:
+
+- **`.abr/prompt.md`** — repo-level, appended to every agent prompt for this repo
+- **`~/.config/abr/prompt.md`** — global, appended to all repos (loaded first)
+- **`prompt_file = <path>`** in `.abr.conf` — override workspace prompt file
+
+Both are appended after the standard prompt under `## Project-Specific Instructions`. The review agent uses a `## Project-Specific Review Instructions` heading. When neither file exists, prompts are unchanged.
+
+## Session Trace Logs (JSONL)
+
+Every session writes structured events to `/tmp/abr-<session>/session.jsonl`:
+
+```bash
+abr --show-log                           # Print the log
+abr --show-log | jq 'select(.level=="ERROR")'  # Filter errors
+cat /tmp/abr-abr-myrepo/session.jsonl | jq .   # Direct access
+```
+
+Fields: `ts` (ISO-8601 UTC), `session`, `pane`, `agent`, `bead`, `level`, `msg`.
+Event levels: `CLAIM`, `START`, `PR`, `DONE`, `MERGE`, `ERROR`, `EXIT`, `INFO`.
 
 ## Environment Variables
 

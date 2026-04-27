@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.4"
+ABR_VERSION="0.3.5"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -39,6 +39,18 @@ args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
     case "${args[i]}" in
         --version|-V) echo "abr $ABR_VERSION"; exit 0 ;;
+        --show-log)
+            session_name="${TMUX_SESSION:-abr-$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo abr)}"
+            log_dir="/tmp/abr-${session_name}"
+            jsonl="${log_dir}/session.jsonl"
+            if [[ -f "$jsonl" ]]; then
+                cat "$jsonl"
+            else
+                echo "No session log found at: $jsonl" >&2
+                exit 1
+            fi
+            exit 0
+            ;;
         --install-skill) INSTALL_SKILL=true ;;
         --set-default-agent)
             _early_setup_agent="${args[i+1]:-}"
@@ -343,7 +355,7 @@ WORKTREE_BASE="${REPO_ROOT}-worktrees"
 # Config sets defaults; env vars override config; --flags override everything.
 # Supported keys: agent, model, copilot_cli, tmux_session
 ABR_CONFIG="${ABR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/abr/config}"
-_cfg_agent="" _cfg_model="" _cfg_copilot_cli="" _cfg_tmux_session=""
+_cfg_agent="" _cfg_model="" _cfg_copilot_cli="" _cfg_tmux_session="" _cfg_prompt_file=""
 
 for cfg_file in "$ABR_CONFIG" "${REPO_ROOT}/.abr.conf"; do
     if [[ -f "$cfg_file" ]]; then
@@ -362,6 +374,7 @@ for cfg_file in "$ABR_CONFIG" "${REPO_ROOT}/.abr.conf"; do
                 model)        _cfg_model="$value" ;;
                 copilot_cli)  _cfg_copilot_cli="$value" ;;
                 tmux_session) _cfg_tmux_session="$value" ;;
+                prompt_file)  _cfg_prompt_file="$value" ;;
             esac
         done < "$cfg_file"
     fi
@@ -369,6 +382,7 @@ done
 
 # Precedence: env var > config file > built-in default
 COPILOT_CLI="${COPILOT_CLI:-${_cfg_copilot_cli:-copilot}}"
+ABR_PROMPT_FILE="${ABR_PROMPT_FILE:-${_cfg_prompt_file:-}}"
 PARALLEL=0        # 0 = no tmux; N = number of tmux panes
 LOOP_MODE=false
 LOOP_MAX=0        # 0 = unlimited; N = stop after N beads
@@ -452,6 +466,7 @@ Usage:
   abr --install-skill                    Install abr skill for AI agents
   abr --set-default-agent gemini         Interactively configure the default agent
   abr --set-default-model gem31p         Interactively configure the default model
+  abr --show-log                         Print JSONL session trace log to stdout
   abr --dry-run                          Preview without executing
 
 Graceful stop (loop mode):
@@ -511,6 +526,7 @@ Options:
   --install-skill       Install abr skill to AI agent platforms (interactive)
   --set-default-agent   Configures your default agent interactively
   --set-default-model   Configures your default model interactively
+  --show-log            Print JSONL session trace log to stdout; pipe to jq for filtering
   --dry-run             Show what would happen without executing
   --version, -V         Show version
   -h, --help            Show this help
@@ -543,6 +559,12 @@ Config files:
     model          Default model short name (e.g. sonnet46-h)
     copilot_cli    Path to Copilot CLI binary
     tmux_session   tmux session name
+    prompt_file    Override workspace prompt file path (default: .abr/prompt.md)
+
+Per-project prompt customization:
+  .abr/prompt.md              Appended to every agent prompt for this repo
+  ~/.config/abr/prompt.md     Appended globally for all repos
+  prompt_file = <path>        (in .abr.conf) Override workspace prompt file path
 
 Models (--model <name>):
   Use short names from the table, or pass a full model name directly.
@@ -1117,9 +1139,28 @@ ipc_cleanup_self() { rm -f "${WORKTREE_BASE}/.abr-ipc/last_pull_$$"; }
 ipc_event() {
     local level="$1"
     local message="$2"
+    local bead="${3:-}"
     local log="${WORKTREE_BASE}/.abr-ipc/events.log"
-    [[ -f "$log" ]] || return 0
-    printf '%s|%s|%s|%s\n' "$(date +%H:%M:%S)" "${ABR_AGENT_IDX:-?}" "$level" "$message" >> "$log"
+    # Pipe-delimited event log (orchestrator dashboard)
+    if [[ -f "$log" ]]; then
+        printf '%s|%s|%s|%s\n' "$(date +%H:%M:%S)" "${ABR_AGENT_IDX:-?}" "$level" "$message" >> "$log"
+    fi
+    # Structured JSONL trace (only when ABR_LOG_DIR is set and the dir exists)
+    if [[ -n "${ABR_LOG_DIR:-}" && -d "${ABR_LOG_DIR}" ]]; then
+        local _ts _session _pane _agent
+        _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        _session="${TMUX_SESSION:-}"
+        _pane="A${ABR_AGENT_IDX:-?}"
+        _agent="${AGENT_TOOL:-}"
+        # Escape the message for JSON (replace backslash, then double-quote)
+        local _msg_escaped
+        _msg_escaped="${message//\\/\\\\}"
+        _msg_escaped="${_msg_escaped//\"/\\\"}"
+        local _bead_escaped="${bead//\"/\\\"}"
+        printf '{"ts":"%s","session":"%s","pane":"%s","agent":"%s","bead":"%s","level":"%s","msg":"%s"}\n' \
+            "$_ts" "$_session" "$_pane" "$_agent" "$_bead_escaped" "$level" "$_msg_escaped" \
+            >> "${ABR_LOG_DIR}/session.jsonl"
+    fi
 }
 
 # --- Orchestrator dashboard ---------------------------------------------------
@@ -2104,6 +2145,19 @@ build_agent_prompt() {
     local quality_cmds
     quality_cmds=$(detect_quality_commands)
 
+    # Load per-project prompt customizations (global then workspace, both optional)
+    local custom_additions=""
+    local _global_prompt="${XDG_CONFIG_HOME:-$HOME/.config}/abr/prompt.md"
+    local _workspace_prompt="${REPO_ROOT}/.abr/prompt.md"
+    if [[ -f "$_global_prompt" ]]; then
+        custom_additions+=$'\n'"$(cat "$_global_prompt")"
+    fi
+    if [[ -n "${ABR_PROMPT_FILE:-}" && -f "$ABR_PROMPT_FILE" ]]; then
+        custom_additions+=$'\n'"$(cat "$ABR_PROMPT_FILE")"
+    elif [[ -f "$_workspace_prompt" ]]; then
+        custom_additions+=$'\n'"$(cat "$_workspace_prompt")"
+    fi
+
     cat <<PROMPT
 You are an autonomous AI coding agent working on a single task in an isolated git worktree.
 
@@ -2149,6 +2203,11 @@ ${quality_cmds}7. **Report lint findings**: After implementing changes, record b
 - NEVER skip the git push step — work is not done until pushed
 - **Lint gate policy**: You must fix any NEW lint errors in files you changed. Pre-existing baseline errors are acceptable (separate lint-debt bead).
 PROMPT
+
+    # Append custom project instructions if any exist
+    if [[ -n "$custom_additions" ]]; then
+        printf '\n## Project-Specific Instructions\n%s\n' "$custom_additions"
+    fi
 }
 
 # --- Cleanup on exit ----------------------------------------------------------
@@ -2300,7 +2359,7 @@ run_one_bead() {
     log "Branch: $branch | Worktree: $wt_path"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        ipc_event "CLAIM" "Bead $bead_id claimed"
+        ipc_event "CLAIM" "Bead $bead_id claimed" "$bead_id"
         log "[DRY RUN] Would create worktree and launch $AGENT_TOOL for $bead_id"
         return 0
     fi
@@ -2317,7 +2376,7 @@ run_one_bead() {
     # Only emit CLAIM after passing the worktree guard — an agent that loses the
     # race and is blocked above never actually claimed the bead, so it must not
     # inflate the orchestrator's claim count.
-    ipc_event "CLAIM" "Bead $bead_id claimed"
+    ipc_event "CLAIM" "Bead $bead_id claimed" "$bead_id"
 
     mkdir -p "$(dirname "$wt_path")"
 
@@ -2336,7 +2395,7 @@ run_one_bead() {
     prompt=$(build_agent_prompt "$bead_id")
 
     log "Launching $AGENT_TOOL agent..."
-    ipc_event "START" "Launching $AGENT_TOOL for bead $bead_id"
+    ipc_event "START" "Launching $AGENT_TOOL for bead $bead_id" "$bead_id"
 
     # Resolve model and effort from --model flag
     resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
@@ -2419,14 +2478,14 @@ run_one_bead() {
             while IFS= read -r line; do log "  $line"; done <<< "$pr_out"
             if [[ $pr_exit -eq 0 ]]; then
                 log "PR created."
-                ipc_event "PR" "PR created for bead $bead_id"
+                ipc_event "PR" "PR created for bead $bead_id" "$bead_id"
             elif echo "$pr_out" | grep -qi "already exists"; then
                 # The agent created the PR during its own session.
                 # Extract the URL from the error output and still count it as a PR.
                 local existing_url
                 existing_url=$(echo "$pr_out" | grep -o 'https://[^[:space:]]*' | tail -1)
                 log "PR already exists (agent created it): ${existing_url:-see GitHub}"
-                ipc_event "PR" "PR already existed for bead $bead_id${existing_url:+ ($existing_url)}"
+                ipc_event "PR" "PR already existed for bead $bead_id${existing_url:+ ($existing_url)}" "$bead_id"
             else
                 logr "PR creation failed (exit=$pr_exit) — resetting bead to 'open' for retry."
                 local pr_note="${pr_out:0:200}"
@@ -2459,9 +2518,9 @@ run_one_bead() {
     cleanup_worktree "$wt_path" "$branch"
 
     if [[ $exit_code -eq 0 ]]; then
-        ipc_event "DONE" "Bead $bead_id finished"
+        ipc_event "DONE" "Bead $bead_id finished" "$bead_id"
     else
-        ipc_event "ERROR" "Bead $bead_id failed (exit=$exit_code)"
+        ipc_event "ERROR" "Bead $bead_id failed (exit=$exit_code)" "$bead_id"
     fi
     log "=== Finished bead: $bead_id (exit=$exit_code) ==="
     return $exit_code
@@ -2832,6 +2891,19 @@ build_review_prompt() {
     local quality_cmds
     quality_cmds=$(detect_quality_commands)
 
+    # Load per-project review prompt customizations (global then workspace, both optional)
+    local custom_review_additions=""
+    local _global_prompt="${XDG_CONFIG_HOME:-$HOME/.config}/abr/prompt.md"
+    local _workspace_prompt="${REPO_ROOT}/.abr/prompt.md"
+    if [[ -f "$_global_prompt" ]]; then
+        custom_review_additions+=$'\n'"$(cat "$_global_prompt")"
+    fi
+    if [[ -n "${ABR_PROMPT_FILE:-}" && -f "$ABR_PROMPT_FILE" ]]; then
+        custom_review_additions+=$'\n'"$(cat "$ABR_PROMPT_FILE")"
+    elif [[ -f "$_workspace_prompt" ]]; then
+        custom_review_additions+=$'\n'"$(cat "$_workspace_prompt")"
+    fi
+
     local comments_section=""
     if [[ -n "$pr_comments" && "$pr_comments" != "No comments" ]]; then
         comments_section="
@@ -2933,6 +3005,11 @@ If the PR needs changes:
 - Do NOT merge or close the PR — just write the verdict file
 - Do NOT run git push or modify git state beyond checking out branches
 PROMPT
+
+    # Append custom project-specific review instructions if any exist
+    if [[ -n "$custom_review_additions" ]]; then
+        printf '\n## Project-Specific Review Instructions\n%s\n' "$custom_review_additions"
+    fi
 }
 
 # --- Review summary printer ---------------------------------------------------
@@ -3388,7 +3465,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                         log "PR #${pr_number} merged after rebase and branch cleaned up."
                         bd_locked close "$bead_id" 2>/dev/null || true
                         [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
-                        ipc_event "MERGE" "PR #${pr_number} merged (after rebase)"
+                        ipc_event "MERGE" "PR #${pr_number} merged (after rebase)" "$bead_id"
                     else
                         logr "PR #${pr_number} APPROVED but merge still failed after rebase."
                         logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
@@ -3400,7 +3477,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                     logr ">>> ACTION REQUIRED: Please resolve merge conflicts manually for PR #${pr_number} (branch: $branch) <<<"
                     bd_locked update "$bead_id" --notes "PR #${pr_number} approved but has merge conflicts. Manual resolution required." 2>/dev/null || true
                     [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "CONFLICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
-                    ipc_event "ERROR" "PR #${pr_number} merge conflict (manual resolution needed)"
+                    ipc_event "ERROR" "PR #${pr_number} merge conflict (manual resolution needed)" "$bead_id"
                 fi
             else
                 # Merge succeeded — clean up remote branch
@@ -3409,7 +3486,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 log "PR #${pr_number} merged and branch cleaned up."
                 bd_locked close "$bead_id" 2>/dev/null || true
                 [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "APPROVED|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
-                ipc_event "MERGE" "PR #${pr_number} approved and merged"
+                ipc_event "MERGE" "PR #${pr_number} approved and merged" "$bead_id"
             fi
             ;;
 
@@ -3459,7 +3536,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 bd_locked update "$bead_id" --status open --notes "PR #${pr_number} rejected by review agent: ${summary}" 2>/dev/null || true
             fi
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "REJECTED|${pr_number}|${bead_id}|${pr_title}|${followup_id}" >> "$REVIEW_SUMMARY_FILE"
-            ipc_event "DONE" "PR #${pr_number} rejected (${bead_id})"
+            ipc_event "DONE" "PR #${pr_number} rejected (${bead_id})" "$bead_id"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review. See review comment for details." \
@@ -3509,7 +3586,7 @@ for i, issue in enumerate(data.get('issues', []), 1):
                 bd_locked update "$bead_id" --status open --notes "PR #${pr_number} review produced unreadable verdict '$verdict'. PR closed for rework." 2>/dev/null || true
             fi
             [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "ERROR|${pr_number}|${bead_id}|${pr_title}|${followup_id_unk}" >> "$REVIEW_SUMMARY_FILE"
-            ipc_event "ERROR" "PR #${pr_number} unreadable verdict"
+            ipc_event "ERROR" "PR #${pr_number} unreadable verdict" "$bead_id"
 
             # Close the PR
             gh pr close "$pr_number" --comment "Closed by automated review (unreadable verdict). See review comment for raw output." \
@@ -3813,6 +3890,10 @@ main() {
         launch_tmux
         return
     fi
+
+    # Set up log dir for structured trace in no-TUI runs (parallel/orchestrator set it in launch_tmux)
+    ABR_LOG_DIR="${ABR_LOG_DIR:-/tmp/abr-${TMUX_SESSION}}"
+    mkdir -p "$ABR_LOG_DIR"
 
     # Loop mode (sequential, no tmux) — re-invokes script per bead
     if [[ "$LOOP_MODE" == "true" ]]; then
