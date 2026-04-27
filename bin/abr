@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.5"
+ABR_VERSION="0.3.6"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1022,10 +1022,20 @@ pick_next_bead() {
     local ipc_claimed_dir="${WORKTREE_BASE}/.abr-ipc/claimed"
     [[ -d "$ipc_claimed_dir" ]] && claimed_ids=$(ls "$ipc_claimed_dir" 2>/dev/null | tr '\n' ',')
 
+    # Collect bead IDs with existing worktrees. A worktree means another agent
+    # is actively working on that bead. Even after an IPC claim is cleared
+    # (e.g. a child session exits with failure), the worktree persists until
+    # the agent finishes — so skipping here prevents the spin-loop where agents
+    # repeatedly pick the same bead and hit the worktree guard.
+    local wt_ids=""
+    local wt_agent_dir="${WORKTREE_BASE}/agent"
+    [[ -d "$wt_agent_dir" ]] && wt_ids=$(ls "$wt_agent_dir" 2>/dev/null | tr '\n' ',')
+
     bd_locked ready --json 2>/dev/null \
-        | CLAIMED_IDS="$claimed_ids" python3 -c "
+        | CLAIMED_IDS="$claimed_ids" WT_IDS="$wt_ids" python3 -c "
 import sys, json, os
 claimed = set(x for x in os.environ.get('CLAIMED_IDS', '').split(',') if x)
+wt_ids = set(x for x in os.environ.get('WT_IDS', '').split(',') if x)
 try:
     data = json.load(sys.stdin)
     issues = data if isinstance(data, list) else data.get('issues', [])
@@ -1033,7 +1043,7 @@ try:
     # sub-beads (longer ID) as a tiebreaker within the same priority level.
     issues.sort(key=lambda x: (x.get('priority', 2), -len(x.get('id', ''))))
     for issue in issues:
-        if issue['id'] not in claimed:
+        if issue['id'] not in claimed and issue['id'] not in wt_ids:
             print(issue['id'])
             break
 except Exception:
