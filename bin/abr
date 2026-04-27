@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.6"
+ABR_VERSION="0.3.7"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1647,6 +1647,15 @@ cc_cmd_slash_start() {
     local ipc_dir="$1" log="$2" _nw_file="$3"
     local num_workers
     num_workers=$(cat "$_nw_file" 2>/dev/null || echo "4")
+    # Count actually-registered panes from IPC files (num_workers may have been
+    # set to 1 by /review or /go for their EXIT-event tracking, even when all
+    # original panes are still alive and registered).
+    local registered_panes=0
+    for (( _rp=1; _rp<=32; _rp++ )); do
+        [[ -f "${ipc_dir}/pane-A${_rp}" ]] || break
+        (( registered_panes++ ))
+    done
+    [[ "$registered_panes" -gt "$num_workers" ]] && num_workers="$registered_panes"
     local work_target agent_count loop_count chosen_agent chosen_model
 
     work_target=$(prompt_choose "Step 1: what do you want to work on?" "next ready bead(s)" "specific bead") || return 1
