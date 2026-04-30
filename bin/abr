@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.8"
+ABR_VERSION="0.3.9"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1413,11 +1413,15 @@ cc_cmd_slash_prune() {
 cc_first_target_alias() {
     local ipc_dir="$1"
     local num_workers="$2"
-    for (( i=1; i<=num_workers; i++ )); do
-        if [[ -f "${ipc_dir}/pane-A${i}" ]]; then
-            echo "A${i}"
-            return 0
-        fi
+    # Return the first registered pane that has no active-A<n> marker (i.e. is idle).
+    # Scans up to num_workers or 32 (whichever is larger) to catch dynamically
+    # spawned panes whose indices may exceed the stored num_workers value.
+    local scan_max=$(( num_workers > 32 ? num_workers : 32 ))
+    for (( i=1; i<=scan_max; i++ )); do
+        [[ -f "${ipc_dir}/pane-A${i}" ]] || continue
+        [[ -f "${ipc_dir}/active-A${i}" ]] && continue
+        echo "A${i}"
+        return 0
     done
     return 1
 }
@@ -1427,7 +1431,7 @@ cc_cmd_slash_go() {
     local target
     local -a run_args
     target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
-        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        printf '\e[31mNo idle panes available — all panes are busy. Use /stop or /kill to free one first.\e[0m\n'
         return 1
     }
     # Tell the orchestrator to expect exactly 1 EXIT event for this single-agent session
@@ -1443,7 +1447,7 @@ cc_cmd_slash_review() {
     local target
     local -a run_args
     target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
-        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        printf '\e[31mNo idle panes available — all panes are busy. Use /stop or /kill to free one first.\e[0m\n'
         return 1
     }
     # Tell the orchestrator to expect exactly 1 EXIT event for this review session
@@ -1608,7 +1612,10 @@ cc_cmd_slash_bead() {
         "send to an agent")
             local target
             local -a run_args
-            target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || return 1
+            target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
+                printf '\e[31mNo idle panes available — all panes are busy. Use /stop or /kill to free one first.\e[0m\n'
+                return 1
+            }
             run_args=(--target "$target" --agent "$AGENT_TOOL" --bead "$bead" --single-run)
             [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
             cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
@@ -1679,22 +1686,45 @@ cc_cmd_slash_start() {
         return 0
     fi
 
-    # Expand worker panes if more are needed than currently available
-    if [[ "$agent_count" -gt "$num_workers" ]]; then
-        local needed=$(( agent_count - num_workers ))
-        printf '\e[33mNeed %d more worker pane(s). Spawning…\e[0m\n' "$needed"
-        local n
-        for (( n=num_workers+1; n<=agent_count; n++ )); do
-            if _cc_spawn_idle_pane "$ipc_dir" "$n"; then
-                printf '\e[32mSpawned pane A%d\e[0m\n' "$n"
-            else
-                printf '\e[31mFailed to spawn pane A%d — launching with %d agent(s)\e[0m\n' "$n" "$((n-1))"
-                agent_count=$((n - 1))
+    # Collect idle pane aliases (registered but no active-A<n> marker).
+    # Scan up to 32 to catch panes beyond the stored num_workers count.
+    local -a idle_targets=()
+    local _pi
+    for (( _pi=1; _pi<=32; _pi++ )); do
+        [[ -f "${ipc_dir}/pane-A${_pi}" ]] || continue
+        [[ -f "${ipc_dir}/active-A${_pi}" ]] && continue
+        idle_targets+=("A${_pi}")
+        [[ "${#idle_targets[@]}" -ge "$agent_count" ]] && break
+    done
+
+    # Spawn additional idle panes if we need more than are currently idle.
+    if [[ "${#idle_targets[@]}" -lt "$agent_count" ]]; then
+        local still_needed=$(( agent_count - ${#idle_targets[@]} ))
+        printf '\e[33mNeed %d more idle worker pane(s). Spawning…\e[0m\n' "$still_needed"
+        # Find the highest-numbered registered pane to continue numbering
+        local next_idx=1
+        for (( _pi=32; _pi>=1; _pi-- )); do
+            if [[ -f "${ipc_dir}/pane-A${_pi}" ]]; then
+                next_idx=$(( _pi + 1 ))
                 break
             fi
         done
-        echo "$agent_count" > "$_nw_file"
-        num_workers="$agent_count"
+        for (( _sn=0; _sn<still_needed; _sn++ )); do
+            local new_idx=$(( next_idx + _sn ))
+            if _cc_spawn_idle_pane "$ipc_dir" "$new_idx"; then
+                idle_targets+=("A${new_idx}")
+                printf '\e[32mSpawned pane A%d\e[0m\n' "$new_idx"
+            else
+                printf '\e[31mFailed to spawn pane A%d — launching with %d agent(s)\e[0m\n' "$new_idx" "${#idle_targets[@]}"
+                agent_count="${#idle_targets[@]}"
+                break
+            fi
+        done
+    fi
+
+    if [[ "$agent_count" -eq 0 ]]; then
+        printf '\e[31mNo idle panes available — use /stop or /kill to free a pane first.\e[0m\n'
+        return 1
     fi
 
     local specific_bead=""
@@ -1704,7 +1734,7 @@ cc_cmd_slash_start() {
             return 1
         }
         if [[ "$agent_count" -gt 1 ]]; then
-            printf '\e[33mSpecific bead with multiple agents: only pane A1 will receive the specific bead; others get next ready.\e[0m\n'
+            printf '\e[33mSpecific bead with multiple agents: only %s will receive the specific bead; others get next ready.\e[0m\n' "${idle_targets[0]}"
         fi
     fi
 
@@ -1712,10 +1742,10 @@ cc_cmd_slash_start() {
     echo "$agent_count" > "$_nw_file"
 
     local i
-    for (( i=1; i<=agent_count; i++ )); do
-        local target="A${i}"
+    for (( i=0; i<agent_count; i++ )); do
+        local target="${idle_targets[$i]}"
         local -a run_args=(--target "$target" --agent "$chosen_agent" --model "$chosen_model")
-        if [[ -n "$specific_bead" ]] && [[ $i -eq 1 ]]; then
+        if [[ -n "$specific_bead" ]] && [[ $i -eq 0 ]]; then
             run_args+=(--bead "$specific_bead" --single-run)
         elif [[ "$loop_count" -gt 1 ]]; then
             run_args+=("--loop-${loop_count}")
@@ -1815,13 +1845,19 @@ cc_cmd_run() {
     # Derive log dir from current session name (consistent with launch-time ABR_LOG_DIR)
     local run_log_dir="/tmp/abr-$(tmux display-message -p '#{session_name}' 2>/dev/null || echo abr)"
 
-    # $TMUX_PANE is evaluated by the shell in the new pane (deferred via \$)
-    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${run_log_dir}/agent-${target}.log'\"; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
+    # $TMUX_PANE is evaluated by the shell in the new pane (deferred via \$).
+    # The active marker is written inside the pane (after pane ID is registered)
+    # and removed when abr finishes, so idle-pane detection is accurate.
+    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; touch '${ipc_dir}/active-${target}'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${run_log_dir}/agent-${target}.log'\"; cd '${REPO_ROOT}' && '${script_path}' ${flags}; rm -f '${ipc_dir}/active-${target}'; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
+    # Mark the pane as active immediately (so a rapid /start after this sees it busy)
+    touch "${ipc_dir}/active-${target}"
     if tmux respawn-pane -k -t "$pane_id" "$new_cmd" 2>/dev/null; then
         printf '%s|0|INFO|C&C: respawned %s (%s)  →  abr %s\n' \
             "$(date +%H:%M:%S)" "$target" "$pane_id" "$flags" >> "$log"
         printf '\e[32mRespawned %s (%s) with: abr %s\e[0m\n' "$target" "$pane_id" "$flags"
     else
+        # Respawn failed — remove the marker so the pane stays visible as idle
+        rm -f "${ipc_dir}/active-${target}"
         printf '\e[31mFailed to respawn %s (%s) — pane may no longer exist\e[0m\n' "$target" "$pane_id"
     fi
 }
