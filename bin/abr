@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.11"
+ABR_VERSION="0.3.12"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -492,6 +492,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /bead               Select one bead, then choose an action
     abr> /prune              Prune merged branches (local, remote, or both)
     abr> /review             Run a single review agent on open agent PRs
+    abr> /relayout           Resize panes to match current terminal window size
     abr> /help               Print slash-command reference in dashboard
     abr> /exit or /quit      Kill the whole tmux session and return to terminal
 
@@ -1192,6 +1193,11 @@ run_orchestrator() {
     local gum_flag=""
     command -v gum >/dev/null 2>&1 && gum_flag=" · gum ✓"
 
+    # Save orchestrator pane ID so /relayout can find the center column.
+    if [[ -n "${TMUX_PANE:-}" ]]; then
+        printf '%s' "$TMUX_PANE" > "${WORKTREE_BASE}/.abr-ipc/pane-orch"
+    fi
+
     # Split a 4-line C&C prompt pane below this orchestrator pane.
     # TMUX_PANE is set automatically by tmux in each pane's shell environment.
     if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
@@ -1322,10 +1328,11 @@ run_cc() {
                 "/model   Pick and persist default model" \
                 "/beads   Show kanban-style bead board" \
                 "/bead    Pick bead then action menu" \
-                "/prune   Prune merged local/remote branches" \
-                "/review  Run one review agent on open PRs" \
-                "/help    Print command help to dashboard" \
-                "/exit    Kill tmux session and return" \
+                "/prune     Prune merged local/remote branches" \
+                "/review    Run one review agent on open PRs" \
+                "/relayout  Refresh pane layout to current window size" \
+                "/help      Print command help to dashboard" \
+                "/exit      Kill tmux session and return" \
                 | gum filter --placeholder "type to filter commands…" \
                               --height 12 --select-if-one)
             local _pick_rc=$?
@@ -1355,6 +1362,7 @@ run_cc() {
             bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             prune)    cc_cmd_slash_prune "$log" || cmd_rc=$? ;;
             review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
+            relayout) cc_cmd_slash_relayout "$log" "$num_workers" "$ipc_dir" || cmd_rc=$? ;;
             run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" || cmd_rc=$? ;;
             stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
@@ -1898,6 +1906,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
         printf '%s|0|INFO|  /prune               Prune merged local/remote branches\n' "$ts"
         printf '%s|0|INFO|  /review              Run one review agent on open agent PRs\n' "$ts"
+        printf '%s|0|INFO|  /relayout            Refresh pane layout to match current window size\n' "$ts"
         printf '%s|0|INFO|  /help                Print this help\n' "$ts"
         printf '%s|0|INFO|  /exit or /quit       Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|\n' "$ts"
@@ -1909,9 +1918,52 @@ cc_cmd_help() {
         printf '%s|0|INFO|  status                Show pane→ID map and liveness\n' "$ts"
         printf '%s|0|INFO|  help                  Print this message in the dashboard\n' "$ts"
         printf '%s|0|INFO|  exit / quit           Kill whole tmux session and return\n' "$ts"
+        printf '%s|0|INFO|  /relayout             Refresh pane layout to match current window size\n' "$ts"
         printf '%s|0|INFO|────────────────────────────────────────────────\n' "$ts"
     } >> "$log"
     printf '\e[90m(Help text sent to dashboard above)\e[0m\n'
+}
+
+# relayout
+# Resizes the tmux window to the current client dimensions and re-applies the
+# default column layout (even-horizontal + center pinned to 250 cols).
+cc_cmd_slash_relayout() {
+    local log="$1" num_workers="$2" ipc_dir="$3"
+    local ts; ts=$(date +%H:%M:%S)
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    if [[ -z "$session" ]]; then
+        printf '\e[31mNot inside tmux — cannot relayout.\e[0m\n'
+        return 1
+    fi
+
+    # Query actual client (terminal) dimensions.
+    local w h
+    w=$(tmux display-message -p '#{client_width}'  2>/dev/null || echo "220")
+    h=$(tmux display-message -p '#{client_height}' 2>/dev/null || echo "50")
+
+    # Expand the session window to fill the terminal.
+    tmux resize-window -t "$session" -x "$w" -y "$h" 2>/dev/null || true
+
+    if [[ $num_workers -le 1 ]]; then
+        tmux select-layout -t "$session" even-vertical 2>/dev/null || true
+    else
+        # 3-column layout: equalize horizontally, then pin center to 250 cols.
+        local center_pane
+        center_pane=$(cat "${ipc_dir}/pane-orch" 2>/dev/null || echo "")
+        tmux select-layout -t "$session" even-horizontal 2>/dev/null || true
+        if [[ -n "$center_pane" ]]; then
+            tmux resize-pane -x 250 -t "$center_pane" 2>/dev/null || true
+        fi
+    fi
+
+    # Restore the C&C pane to its 4-line height.
+    local cc_pane_id
+    cc_pane_id=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+    [[ -n "$cc_pane_id" ]] && tmux resize-pane -t "$cc_pane_id" -y 4 2>/dev/null || true
+
+    printf '%s|0|INFO|Layout refreshed: %dx%d client, center pinned to 250 cols\n' "$ts" "$w" "$h" >> "$log"
+    printf '\e[90m(Layout refreshed to %dx%d)\e[0m\n' "$w" "$h"
 }
 
 # status
