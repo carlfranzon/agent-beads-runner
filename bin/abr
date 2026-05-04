@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.10"
+ABR_VERSION="0.3.11"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -48,19 +48,6 @@ for ((i=0; i<${#args[@]}; i++)); do
             else
                 echo "No session log found at: $jsonl" >&2
                 exit 1
-            fi
-            exit 0
-            ;;
-        --log-event)
-            _log_level="${args[i+1]:-WARN}"
-            _log_msg="${args[i+2]:-}"
-            _log_path="${ABR_EVENTS_LOG:-}"
-            if [[ -z "$_log_path" ]]; then
-                _log_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-                _log_path="${_log_root}-worktrees/.abr-ipc/events.log"
-            fi
-            if [[ -f "$_log_path" ]]; then
-                printf '%s|%s|%s|%s\n' "$(date +%H:%M:%S)" "${ABR_AGENT_IDX:-?}" "$_log_level" "$_log_msg" >> "$_log_path"
             fi
             exit 0
             ;;
@@ -406,6 +393,7 @@ DRY_RUN=false
 NEW_TMUX=false
 PRUNE_LOCAL_BRANCHES=false
 PRUNE_REMOTE_BRANCHES=false
+PLAN_MODE=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
 REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
@@ -436,6 +424,7 @@ while [[ $# -gt 0 ]]; do
         --new-tmux)     NEW_TMUX=true; shift ;;
         --prune-local-branches) PRUNE_LOCAL_BRANCHES=true; shift ;;
         --prune-remote-branches) PRUNE_REMOTE_BRANCHES=true; shift ;;
+        --plan)         PLAN_MODE=true; NO_TUI=true; shift ;;
         --bead)         TARGET_BEAD="$2"; shift 2 ;;
         --pr)           TARGET_PR="$2"; shift 2 ;;
         --agent)        AGENT_TOOL="$2"; shift 2 ;;
@@ -480,6 +469,8 @@ Usage:
   abr --set-default-agent gemini         Interactively configure the default agent
   abr --set-default-model gem31p         Interactively configure the default model
   abr --show-log                         Print JSONL session trace log to stdout
+  abr --plan                             Interactive feature decomposition → beads
+  abr --plan --agent claude              Use Claude for planning (any agent works)
   abr --dry-run                          Preview without executing
 
 Graceful stop (loop mode):
@@ -551,6 +542,7 @@ Modes compose:
   --parallel-N          N tmux panes → each works one bead → all exit
   --loop --parallel-N   N tmux panes → each loops (fresh session per bead) → exit when none left
   --review              Review agent PRs → run quality gates → AI verdict → merge or reject
+  --plan                Spec-driven feature planning → produces atomic beads
 
 tmux behavior:
   If a tmux session already exists for this repo, new --parallel panes are added
@@ -1225,7 +1217,7 @@ run_orchestrator() {
         return 1
     fi
 
-    local exit_count=0 claim_count=0 done_count=0 error_count=0 warn_count=0 pr_count=0 merge_count=0 session_num=0
+    local exit_count=0 claim_count=0 done_count=0 error_count=0 pr_count=0 merge_count=0 session_num=0
 
     # Use a FIFO so we can break cleanly from the read loop (subshell-free)
     local orch_fifo
@@ -1242,12 +1234,9 @@ run_orchestrator() {
         case "$level" in
             CLAIM)
                 (( claim_count++ )) || true
-                printf '%s \e[32mCLAIM \e[0m %s\n' "$label" "$msg" ;;
+                printf '%s \e[33mCLAIM \e[0m %s\n' "$label" "$msg" ;;
             START)
-                printf '%s \e[32mSTART \e[0m %s\n' "$label" "$msg" ;;
-            WARN)
-                (( warn_count++ )) || true
-                printf '%s \e[33mWARN  \e[0m %s\n' "$label" "$msg" ;;
+                printf '%s \e[34mSTART \e[0m %s\n' "$label" "$msg" ;;
             PR)
                 (( pr_count++ )) || true
                 printf '%s \e[32mPR    \e[0m %s\n' "$label" "$msg" ;;
@@ -1274,12 +1263,11 @@ run_orchestrator() {
                     printf '  Items done:      %d\n' "$done_count"
                     [[ $pr_count -gt 0 ]]    && printf '  PRs created:     %d\n' "$pr_count"
                     [[ $merge_count -gt 0 ]] && printf '  PRs merged:      %d\n' "$merge_count"
-                    [[ $warn_count -gt 0 ]]  && printf '\e[33m  Warnings:        %d\e[0m\n' "$warn_count"
                     [[ $error_count -gt 0 ]] && printf '\e[31m  Errors:          %d\e[0m\n' "$error_count" \
                                               || printf '  Errors:          0\n'
                     printf '\e[1;36m════════════════════════════════════\e[0m\n'
                     printf '\e[90m── Session %d done · Watching for next session (type \e[0m/exit\e[90m in C&C to quit) ──\e[0m\n\n' "$session_num"
-                    exit_count=0; claim_count=0; done_count=0; error_count=0; warn_count=0; pr_count=0; merge_count=0
+                    exit_count=0; claim_count=0; done_count=0; error_count=0; pr_count=0; merge_count=0
                 fi
                 ;;
             INFO)
@@ -2238,15 +2226,6 @@ ${quality_cmds}7. **Report lint findings**: After implementing changes, record b
 - Do NOT use interactive editors (vim, nano, etc.)
 - NEVER skip the git push step — work is not done until pushed
 - **Lint gate policy**: You must fix any NEW lint errors in files you changed. Pre-existing baseline errors are acceptable (separate lint-debt bead).
-
-## Reporting to Orchestrator Dashboard
-If you encounter a warning or non-fatal issue, report it so it appears in the orchestrator log:
-  abr --log-event WARN "<concise description of the warning>"
-
-For a critical error that is blocking progress:
-  abr --log-event ERROR "<concise description of the error>"
-
-Only use WARN/ERROR for genuinely unexpected situations (blocked dependency, missing config, broken environment). Do NOT emit a warning just to report normal progress.
 PROMPT
 
     # Append custom project instructions if any exist
@@ -2491,9 +2470,6 @@ run_one_bead() {
 
     log "Launching $AGENT_TOOL agent..."
     ipc_event "START" "Launching $AGENT_TOOL for bead $bead_id" "$bead_id"
-
-    # Expose events log path so the agent can write WARN/ERROR events via: abr --log-event LEVEL MSG
-    export ABR_EVENTS_LOG="${WORKTREE_BASE}/.abr-ipc/events.log"
 
     # Resolve model and effort from --model flag
     resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
@@ -3343,9 +3319,6 @@ for f in files:
 
     log "Launching $AGENT_TOOL review agent..."
 
-    # Expose events log path so the review agent can write WARN/ERROR events via: abr --log-event LEVEL MSG
-    export ABR_EVENTS_LOG="${WORKTREE_BASE}/.abr-ipc/events.log"
-
     # Resolve model and effort from --model flag
     resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
 
@@ -3875,6 +3848,369 @@ for p in agent_prs:
     log "=== Review complete ==="
 }
 
+build_plan_prompt() {
+    local feature_name="$1"
+    local feature_desc="$2"
+    local use_openspec="$3"
+
+    local plan_dir="${REPO_ROOT}/.abr/plans/${feature_name}"
+
+    cat <<PLAN_PROMPT
+You are a software architect helping decompose a feature into atomic, parallelizable tasks (called "beads").
+
+## Feature: ${feature_name}
+
+${feature_desc}
+
+## Your Goal
+
+Analyze this feature and decompose it into the smallest possible independent beads that can be worked on by parallel AI coding agents. Each bead should be:
+- **Atomic**: Completable in a single focused coding session
+- **Independent**: Minimal dependencies on other beads (use blockers only when truly sequential)
+- **Clear**: Title and description sufficient for an AI agent to implement without ambiguity
+- **Testable**: Has a clear "done" criteria
+
+## Repository Context
+
+- Root: ${REPO_ROOT}
+- Read the codebase to understand the existing architecture before decomposing
+- Use \`bd prime\` to load the beads workflow context
+- Use \`bd list\` to see existing beads and avoid duplicates
+PLAN_PROMPT
+
+    if [[ "$use_openspec" == "true" ]]; then
+        cat <<OPENSPEC_SECTION
+
+## OpenSpec Spec-Driven Planning
+
+An OpenSpec change has been created at: openspec/changes/${feature_name}/
+
+**Follow this workflow:**
+1. Read existing specs in openspec/specs/ (if any) to understand current system behavior
+2. Write openspec/changes/${feature_name}/proposal.md — Intent, scope, non-goals, approach
+3. Write delta specs in openspec/changes/${feature_name}/specs/ — ADDED/MODIFIED/REMOVED requirements using RFC 2119 (SHALL/MUST/SHOULD). Include Given/When/Then scenarios.
+4. Write openspec/changes/${feature_name}/design.md — Technical approach, architecture decisions, data flow, file changes
+5. Then decompose into beads (step below)
+
+**Do NOT write tasks.md** — the bead decomposition replaces it.
+OPENSPEC_SECTION
+    fi
+
+    cat <<PLAN_PROMPT2
+
+## Output: Bead Decomposition
+
+After analyzing the feature (and writing OpenSpec artifacts if applicable), create the bead decomposition.
+
+**Write the file**: \`${plan_dir}/beads.json\`
+
+The JSON must be a valid \`bd create --graph\` input:
+\`\`\`json
+[
+  {
+    "title": "Short imperative title",
+    "description": "Detailed description of what to implement, including file paths and acceptance criteria",
+    "priority": 1
+  },
+  {
+    "title": "Second task that depends on the first",
+    "description": "Details...",
+    "priority": 2,
+    "blocked_by": [0]
+  }
+]
+\`\`\`
+
+Rules for the graph JSON:
+- Array of objects, each becomes one bead
+- "blocked_by" is an array of 0-based indices into this same array
+- "priority" is 1 (highest) to 5 (lowest) — use 1-2 for most beads
+- Minimize blocked_by — prefer independent parallel beads over long chains
+- Aim for 3-12 beads per feature (not too granular, not too coarse)
+- Each bead description should mention specific files/modules to change
+- Include one final "integration test" or "verification" bead that depends on all others
+
+## Interaction
+
+This is an interactive session. Discuss the decomposition with the user before writing beads.json:
+1. First, explore the codebase and present your understanding
+2. Propose an initial decomposition outline
+3. Refine based on user feedback
+4. When the user approves, write the final beads.json file
+
+Do NOT auto-generate beads.json without discussion first.
+PLAN_PROMPT2
+}
+
+_write_openspec_tasks_snapshot() {
+    local feature_name="$1"
+    local beads_json_file="$2"
+    local tasks_file="${REPO_ROOT}/openspec/changes/${feature_name}/tasks.md"
+
+    # Only write if the OpenSpec change directory exists
+    [[ -d "${REPO_ROOT}/openspec/changes/${feature_name}" ]] || return 0
+
+    {
+        echo "# Tasks (snapshot — managed by beads, not updated)"
+        echo ""
+        echo "> This file is a snapshot created by \`abr --plan\`. Bead status is"
+        echo "> tracked in the beads database (\`bd list\`), not in this file."
+        echo "> Check boxes are not maintained."
+        echo ""
+        # Parse the beads JSON to write task lines
+        python3 -c "
+import json, sys
+beads = json.load(open('$beads_json_file'))
+group = 1
+for i, b in enumerate(beads):
+    title = b.get('title', f'Task {i+1}')
+    print(f'- [ ] {group}.{i+1} {title}')
+" 2>/dev/null || echo "- [ ] (could not parse beads.json)"
+    } > "$tasks_file"
+
+    log "Wrote OpenSpec tasks snapshot: $tasks_file"
+}
+
+run_plan_mode() {
+    log "=== Plan mode: interactive feature decomposition ==="
+
+    # --- Step 0: OpenSpec check ---
+    local use_openspec=false
+    local openspec_initialized=false
+
+    if [[ -d "${REPO_ROOT}/openspec" ]]; then
+        openspec_initialized=true
+    fi
+
+    if command -v openspec &>/dev/null; then
+        # OpenSpec CLI is installed
+        if [[ "$openspec_initialized" == "true" ]]; then
+            # Already initialized — ask if they want to use it
+            if prompt_confirm "Use OpenSpec for spec-driven planning? (openspec/ found)"; then
+                use_openspec=true
+            fi
+        else
+            # Installed but not initialized
+            if prompt_confirm "Use OpenSpec for spec-driven planning?"; then
+                use_openspec=true
+                log "Initializing OpenSpec in this repo..."
+                # --tools none: abr manages agent invocations; don't inject per-tool instructions
+                (cd "$REPO_ROOT" && openspec init --tools none) || {
+                    logr "OpenSpec init failed. Continuing without OpenSpec."
+                    use_openspec=false
+                }
+            fi
+        fi
+    else
+        # OpenSpec not installed
+        if prompt_confirm "Install OpenSpec for spec-driven planning? (optional — enhances planning with formal specs)"; then
+            log "Installing OpenSpec..."
+            if npm install -g @fission-ai/openspec@latest 2>&1 | tail -3; then
+                log "OpenSpec installed."
+                log "Initializing OpenSpec in this repo..."
+                (cd "$REPO_ROOT" && openspec init --tools none) || {
+                    logr "OpenSpec init failed. Continuing without OpenSpec."
+                    use_openspec=false
+                }
+                [[ $? -eq 0 ]] && use_openspec=true
+            else
+                logr "npm install failed. Continuing without OpenSpec."
+            fi
+        fi
+    fi
+
+    # --- Step 1: Feature name and description ---
+    local feature_name feature_desc
+
+    feature_name=$(prompt_input "Feature name (kebab-case):" "add-oauth-login") || {
+        logr "Cancelled."; return 1
+    }
+    if [[ -z "$feature_name" ]]; then
+        logr "Feature name is required."; return 1
+    fi
+    # Sanitize to kebab-case
+    feature_name=$(echo "$feature_name" | tr '[:upper:]' '[:lower:]' | tr ' _' '-' | tr -cd 'a-z0-9-')
+
+    echo ""
+    echo "Describe the feature. Include scope, goals, constraints."
+    echo "Press Enter twice (empty line) to finish, or Ctrl+C to cancel."
+    echo ""
+    local desc_lines=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && break
+        desc_lines+=("$line")
+    done
+    feature_desc=$(printf '%s\n' "${desc_lines[@]}")
+
+    if [[ -z "$feature_desc" ]]; then
+        logr "Feature description is required."; return 1
+    fi
+
+    # --- Step 2: Resolve agent and model ---
+    resolve_model_and_effort "$AGENT_TOOL" "$MODEL"
+    log "Planning agent: $AGENT_TOOL (model: ${MODEL_RESOLVED:-default})"
+
+    # --- Step 3: Planning artifacts ---
+    local plan_dir="${REPO_ROOT}/.abr/plans/${feature_name}"
+    mkdir -p "$plan_dir"
+
+    if [[ "$use_openspec" == "true" ]]; then
+        # Create OpenSpec change scaffold
+        log "Creating OpenSpec change: $feature_name"
+        (cd "$REPO_ROOT" && openspec new change "$feature_name" --description "$feature_desc") || {
+            logr "Failed to create OpenSpec change. Falling back to basic planning."
+            use_openspec=false
+        }
+    fi
+
+    # Build the planning prompt
+    local plan_prompt
+    plan_prompt=$(build_plan_prompt "$feature_name" "$feature_desc" "$use_openspec")
+
+    # Write prompt to plan dir for reference
+    echo "$plan_prompt" > "${plan_dir}/prompt.txt"
+
+    # --- Step 4: Launch planning agent (interactive, not autopilot) ---
+    log "Launching $AGENT_TOOL in interactive planning mode..."
+    log "Converse with the agent to refine the plan. When done, exit the agent session."
+    echo ""
+
+    case "$AGENT_TOOL" in
+        copilot)
+            local cp_model="${MODEL_RESOLVED:-claude-sonnet-4.6}"
+            local cp_effort="${EFFORT_RESOLVED:-high}"
+            (cd "$REPO_ROOT" && "$COPILOT_CLI" \
+                -i "$plan_prompt" \
+                --model "$cp_model" \
+                --effort "$cp_effort" \
+                --mode plan \
+                --allow-all)
+            ;;
+        claude)
+            local cl_args=("$plan_prompt" --permission-mode plan)
+            [[ -n "$MODEL_RESOLVED" ]] && cl_args+=(--model "$MODEL_RESOLVED")
+            (cd "$REPO_ROOT" && claude "${cl_args[@]}")
+            ;;
+        gemini)
+            local gm_args=(-i "$plan_prompt" --approval-mode plan)
+            [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
+            (cd "$REPO_ROOT" && gemini "${gm_args[@]}")
+            ;;
+        codex)
+            local cx_args=(-a on-request)
+            [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
+            [[ -n "$EFFORT_RESOLVED" ]] && cx_args+=(-c "model_reasoning_effort=\"$EFFORT_RESOLVED\"")
+            cx_args+=("$plan_prompt")
+            (cd "$REPO_ROOT" && codex "${cx_args[@]}")
+            ;;
+        *)
+            logr "Unknown agent tool: $AGENT_TOOL"
+            return 1
+            ;;
+    esac
+
+    local agent_exit=$?
+    if [[ $agent_exit -ne 0 ]]; then
+        logr "Planning agent exited with code $agent_exit"
+    fi
+
+    # --- Step 5: Approval gate ---
+    local beads_json="${plan_dir}/beads.json"
+
+    if [[ ! -f "$beads_json" ]]; then
+        logr "No beads.json found at ${beads_json}."
+        logr "The planning agent should write the bead decomposition to this file."
+        logr "You can re-run 'abr --plan' or create beads manually with 'bd create --graph'."
+        return 1
+    fi
+
+    echo ""
+    log "=== Bead Decomposition Preview ==="
+    echo ""
+    # Pretty-print the beads JSON
+    python3 -m json.tool "$beads_json" 2>/dev/null || cat "$beads_json"
+    echo ""
+
+    local approved=false
+    while [[ "$approved" == "false" ]]; do
+        local choice
+        choice=$(prompt_choose "Review the bead decomposition:" \
+            "accept — Create these beads" \
+            "edit — Open beads.json in \$EDITOR" \
+            "replan — Re-launch agent to revise" \
+            "discard — Cancel without creating beads") || {
+            logr "Cancelled."; return 1
+        }
+
+        case "$choice" in
+            accept*)
+                approved=true
+                ;;
+            edit*)
+                "${EDITOR:-vi}" "$beads_json"
+                echo ""
+                log "Updated beads.json:"
+                python3 -m json.tool "$beads_json" 2>/dev/null || cat "$beads_json"
+                echo ""
+                ;;
+            replan*)
+                log "Re-launching planning agent..."
+                local revise_prompt="Review the current bead decomposition in ${beads_json} and revise it based on user feedback. The current plan is:"
+                revise_prompt+=$'\n'"$(cat "$beads_json")"
+                revise_prompt+=$'\n\n'"Update the file at ${beads_json} with the revised decomposition."
+
+                case "$AGENT_TOOL" in
+                    copilot) (cd "$REPO_ROOT" && "$COPILOT_CLI" -i "$revise_prompt" --model "${MODEL_RESOLVED:-claude-sonnet-4.6}" --effort "${EFFORT_RESOLVED:-high}" --mode plan --allow-all) ;;
+                    claude)  local ra=("$revise_prompt" --permission-mode plan); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); (cd "$REPO_ROOT" && claude "${ra[@]}") ;;
+                    gemini)  local ra=(-i "$revise_prompt" --approval-mode plan); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); (cd "$REPO_ROOT" && gemini "${ra[@]}") ;;
+                    codex)   local ra=(-a on-request); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); ra+=("$revise_prompt"); (cd "$REPO_ROOT" && codex "${ra[@]}") ;;
+                esac
+
+                echo ""
+                log "Revised beads.json:"
+                python3 -m json.tool "$beads_json" 2>/dev/null || cat "$beads_json"
+                echo ""
+                ;;
+            discard*)
+                log "Plan discarded."
+                return 0
+                ;;
+        esac
+    done
+
+    # --- Step 6: Create beads from approved plan ---
+    log "Creating beads from plan..."
+    local graph_json
+    graph_json=$(<"$beads_json")
+
+    local bd_out bd_exit
+    bd_out=$(bd_locked create --graph "$graph_json" 2>&1)
+    bd_exit=$?
+    echo "$bd_out"
+
+    if [[ $bd_exit -eq 0 ]]; then
+        log "Beads created successfully."
+        bd_locked dolt push 2>/dev/null || true
+
+        # Write tasks.md snapshot for OpenSpec (if enabled)
+        if [[ "$use_openspec" == "true" ]]; then
+            _write_openspec_tasks_snapshot "$feature_name" "$beads_json"
+        fi
+
+        echo ""
+        log "Plan complete! Next steps:"
+        log "  abr              — Launch orchestrator and /start agents"
+        log "  abr --loop       — Process beads sequentially"
+        log "  bd ready         — See ready beads"
+        log "  bd graph         — View dependency graph"
+    else
+        logr "bd create --graph failed (exit=$bd_exit). The plan JSON is saved at:"
+        logr "  $beads_json"
+        logr "Fix the JSON and run: bd create --graph '\$(cat $beads_json)'"
+        return 1
+    fi
+}
+
 # --- Main entry point ---------------------------------------------------------
 
 main() {
@@ -3973,6 +4309,12 @@ main() {
         ORCHESTRATOR_MODE=true
         PARALLEL=4
         NEW_TMUX=true
+    fi
+
+    # Plan mode — interactive feature decomposition
+    if [[ "$PLAN_MODE" == "true" ]]; then
+        run_plan_mode
+        return
     fi
 
     # Review mode — review open agent PRs

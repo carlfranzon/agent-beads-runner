@@ -11,6 +11,7 @@ Run `abr` from any beads-enabled git repo to automatically pick a bead, create a
 - **Orchestrator dashboard** — Live colour-coded event feed in the center tmux pane
 - **C&C prompt** — Interactive `abr>` command prompt to respawn, stop, or kill individual agent panes on the fly
 - **Loop mode** — Keep picking beads until none remain
+- **Plan mode** — Interactive feature decomposition wizard with optional OpenSpec spec-driven planning
 - **PR review** — Automated code review of agent-created PRs with agent-assisted conflict resolution
 - **Model shortcuts** — Short names for all major models with effort/reasoning control
 - **Graceful stop** — Ctrl+C, stop file, or SIGUSR1 to finish current bead and exit
@@ -98,6 +99,15 @@ abr --review
 # Review a specific PR
 abr --review --pr 5
 
+# Plan a feature interactively
+abr --plan
+
+# Plan with a specific agent
+abr --plan --agent claude
+
+# Plan with specific model
+abr --plan --agent copilot --model opus46-h
+
 # Delete merged local agent/* branches
 abr --prune-local-branches
 
@@ -128,6 +138,7 @@ abr --set-default-model sonnet46-h
 | `--bead <id>` | Work on a specific bead |
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
+| `--plan` | Interactive feature decomposition → beads |
 | `--prune-local-branches` | Delete merged local `agent/*` branches |
 | `--prune-remote-branches` | Delete merged remote `agent/*` branches and stale remote refs |
 | `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `codex` |
@@ -283,6 +294,27 @@ Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listi
 
 - Run `abr --prune-local-branches` to clean up merged local `agent/*` branches from older PRs
 - Run `abr --prune-remote-branches` to clean up merged remote `agent/*` branches and stale remote refs
+
+## Plan Mode
+
+Interactively decompose a feature into atomic beads with AI assistance:
+
+```bash
+abr --plan                        # Plan with default agent
+abr --plan --agent claude         # Plan with Claude
+abr --plan --agent copilot --model opus46-h  # Plan with specific model
+```
+
+The wizard walks through:
+1. **OpenSpec check** — Optionally use spec-driven planning (installs/initializes if needed)
+2. **Feature description** — Name and describe what you want to build
+3. **Interactive agent session** — The agent explores your codebase, proposes a decomposition, and refines it with you
+4. **Approval gate** — Review the bead DAG; accept, edit, re-plan, or discard
+5. **Bead creation** — Creates beads via `bd create --graph`
+
+If OpenSpec is enabled, the agent also writes `proposal.md`, `specs/`, and `design.md` in `openspec/changes/<feature>/` before decomposing into beads. These artifacts are injected into agent prompts during execution for richer context.
+
+Plan artifacts are stored in `.abr/plans/<feature>/`.
 
 ## Quality Gate & Lint Policy
 

@@ -54,6 +54,8 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Setup default agent | `abr --set-default-agent <tool>` |
 | Setup default model | `abr --set-default-model <model>` |
 | Print session trace log | `abr --show-log` |
+| Plan a feature | `abr --plan` |
+| Plan with specific agent | `abr --plan --agent claude --model opus46` |
 
 ## Agents
 
