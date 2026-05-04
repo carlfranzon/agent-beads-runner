@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.13"
+ABR_VERSION="0.3.14"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -494,6 +494,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /review             Run a single review agent on open agent PRs
     abr> /relayout           Resize panes to match current terminal window size
     abr> /update             Run brew update && brew upgrade abr to self-update
+    abr> /restart            Exit and relaunch abr in a fresh tmux session
     abr> /help               Print slash-command reference in dashboard
     abr> /exit or /quit      Kill the whole tmux session and return to terminal
 
@@ -1333,6 +1334,7 @@ run_cc() {
                 "/review    Run one review agent on open PRs" \
                 "/relayout  Refresh pane layout to current window size" \
                 "/update    Self-update abr via brew update && brew upgrade" \
+                "/restart   Exit and relaunch abr in a fresh tmux session" \
                 "/help      Print command help to dashboard" \
                 "/exit      Kill tmux session and return" \
                 | gum filter --placeholder "type to filter commands…" \
@@ -1366,6 +1368,7 @@ run_cc() {
             review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             relayout) cc_cmd_slash_relayout "$log" "$num_workers" "$ipc_dir" || cmd_rc=$? ;;
             update)   cc_cmd_slash_update "$log" || cmd_rc=$? ;;
+            restart)  cc_cmd_slash_restart "$log" || cmd_rc=$?; return 0 ;;
             run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" || cmd_rc=$? ;;
             stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
@@ -1911,6 +1914,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /review              Run one review agent on open agent PRs\n' "$ts"
         printf '%s|0|INFO|  /relayout            Refresh pane layout to match current window size\n' "$ts"
         printf '%s|0|INFO|  /update              Self-update abr via brew update && brew upgrade abr\n' "$ts"
+        printf '%s|0|INFO|  /restart             Exit and relaunch abr in a fresh tmux session\n' "$ts"
         printf '%s|0|INFO|  /help                Print this help\n' "$ts"
         printf '%s|0|INFO|  /exit or /quit       Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|\n' "$ts"
@@ -1926,6 +1930,35 @@ cc_cmd_help() {
         printf '%s|0|INFO|────────────────────────────────────────────────\n' "$ts"
     } >> "$log"
     printf '\e[90m(Help text sent to dashboard above)\e[0m\n'
+}
+
+# restart
+# Kills the current tmux session and relaunches abr in a fresh session.
+# Schedules the relaunch via a detached nohup process so it survives the kill.
+cc_cmd_slash_restart() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    if [[ -z "$session" ]]; then
+        printf '\e[31mNo tmux session detected — cannot restart.\e[0m\n'
+        return 1
+    fi
+    local script_path
+    script_path=$(command -v abr 2>/dev/null || echo "$0")
+    printf '\e[90m(Scheduling restart — session closing in 2 s…)\e[0m\n'
+    printf '%s|0|INFO|C&C: scheduling restart from %s in %s\n' "$ts" "$script_path" "$REPO_ROOT" >> "$log"
+    # Launch a detached process outside tmux that waits for the session to
+    # die, then relaunches abr (orchestrator/default mode) in the same repo.
+    ABR_RESTART_DIR="$REPO_ROOT" ABR_RESTART_BIN="$script_path" \
+        nohup bash -c 'sleep 2; cd "$ABR_RESTART_DIR"; exec "$ABR_RESTART_BIN"' \
+        </dev/null >/dev/null 2>&1 &
+    disown
+    # Clean up log dir then kill the session (mirrors cc_cmd_shutdown).
+    local log_dir="/tmp/abr-${session}"
+    [[ -d "$log_dir" ]] && rm -rf "$log_dir"
+    printf '%s|0|INFO|C&C: restarting — killing tmux session %s\n' "$ts" "$session" >> "$log"
+    tmux kill-session -t "$session"
 }
 
 # update

@@ -272,6 +272,7 @@ Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listi
 | `/prune` | Interactively prune merged local, remote, or both branch sets. |
 | `/review` | Run a single review agent on open agent PRs (uses current agent/model defaults). |
 | `/update` | Self-update abr via `brew update && brew upgrade abr`. |
+| `/restart` | Kill the current session and relaunch abr in a fresh tmux session. |
 | `/help` | Show slash command reference in dashboard. |
 | `/exit` / `/quit` | Kill the whole tmux session (all panes) and return to terminal. |
 
