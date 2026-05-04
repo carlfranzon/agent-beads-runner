@@ -271,6 +271,7 @@ Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listi
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
 | `/prune` | Interactively prune merged local, remote, or both branch sets. |
 | `/review` | Run a single review agent on open agent PRs (uses current agent/model defaults). |
+| `/update` | Self-update abr via `brew update && brew upgrade abr`. |
 | `/help` | Show slash command reference in dashboard. |
 | `/exit` / `/quit` | Kill the whole tmux session (all panes) and return to terminal. |
 

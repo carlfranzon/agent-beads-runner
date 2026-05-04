@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.12"
+ABR_VERSION="0.3.13"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -493,6 +493,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /prune              Prune merged branches (local, remote, or both)
     abr> /review             Run a single review agent on open agent PRs
     abr> /relayout           Resize panes to match current terminal window size
+    abr> /update             Run brew update && brew upgrade abr to self-update
     abr> /help               Print slash-command reference in dashboard
     abr> /exit or /quit      Kill the whole tmux session and return to terminal
 
@@ -1331,6 +1332,7 @@ run_cc() {
                 "/prune     Prune merged local/remote branches" \
                 "/review    Run one review agent on open PRs" \
                 "/relayout  Refresh pane layout to current window size" \
+                "/update    Self-update abr via brew update && brew upgrade" \
                 "/help      Print command help to dashboard" \
                 "/exit      Kill tmux session and return" \
                 | gum filter --placeholder "type to filter commands…" \
@@ -1363,6 +1365,7 @@ run_cc() {
             prune)    cc_cmd_slash_prune "$log" || cmd_rc=$? ;;
             review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             relayout) cc_cmd_slash_relayout "$log" "$num_workers" "$ipc_dir" || cmd_rc=$? ;;
+            update)   cc_cmd_slash_update "$log" || cmd_rc=$? ;;
             run)      cc_cmd_run    "$ipc_dir" "$log" "$num_workers" "${words[@]:1}" || cmd_rc=$? ;;
             stop)     cc_cmd_stop   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
             kill)     cc_cmd_kill   "$ipc_dir" "$log"               "${words[@]:1}" || cmd_rc=$? ;;
@@ -1907,6 +1910,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /prune               Prune merged local/remote branches\n' "$ts"
         printf '%s|0|INFO|  /review              Run one review agent on open agent PRs\n' "$ts"
         printf '%s|0|INFO|  /relayout            Refresh pane layout to match current window size\n' "$ts"
+        printf '%s|0|INFO|  /update              Self-update abr via brew update && brew upgrade abr\n' "$ts"
         printf '%s|0|INFO|  /help                Print this help\n' "$ts"
         printf '%s|0|INFO|  /exit or /quit       Kill whole tmux session and return\n' "$ts"
         printf '%s|0|INFO|\n' "$ts"
@@ -1922,6 +1926,36 @@ cc_cmd_help() {
         printf '%s|0|INFO|────────────────────────────────────────────────\n' "$ts"
     } >> "$log"
     printf '\e[90m(Help text sent to dashboard above)\e[0m\n'
+}
+
+# update
+# Runs `brew update && brew upgrade abr` to self-update the installed formula.
+# Warns clearly if abr is not installed via Homebrew.
+cc_cmd_slash_update() {
+    local log="$1"
+    local ts; ts=$(date +%H:%M:%S)
+    if ! command -v brew &>/dev/null; then
+        printf '\e[31mHomebrew not found — /update only works for Homebrew installs.\e[0m\n'
+        return 1
+    fi
+    local abr_formula
+    abr_formula=$(brew list --formula 2>/dev/null | grep -x abr || true)
+    if [[ -z "$abr_formula" ]]; then
+        printf '\e[33mabr is not installed via Homebrew — cannot self-update.\e[0m\n'
+        return 1
+    fi
+    printf '\e[90m(Running brew update && brew upgrade abr — may take a moment…)\e[0m\n'
+    printf '%s|0|INFO|C&C: running brew update && brew upgrade abr\n' "$ts" >> "$log"
+    if brew update && brew upgrade abr; then
+        local new_ver
+        new_ver=$(brew list --versions abr 2>/dev/null | awk '{print $2}' || echo "unknown")
+        printf '%s|0|INFO|C&C: abr updated to %s\n' "$ts" "$new_ver" >> "$log"
+        printf '\e[32mabr updated to %s. Restart abr to use the new version.\e[0m\n' "$new_ver"
+    else
+        printf '%s|0|INFO|C&C: brew upgrade abr failed\n' "$ts" >> "$log"
+        printf '\e[31mbrew upgrade abr failed — check output above.\e[0m\n'
+        return 1
+    fi
 }
 
 # relayout
