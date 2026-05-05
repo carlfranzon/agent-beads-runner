@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.17"
+ABR_VERSION="0.3.18"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1933,8 +1933,9 @@ cc_cmd_help() {
 }
 
 # restart
-# Kills the current tmux session and relaunches abr in a fresh session.
-# Uses the attached client's TTY so exec tmux attach has a real terminal.
+# Writes a restart flag then kills the session. The outer abr process (blocked
+# on `tmux attach` in launch_tmux) resumes after the session dies, sees the
+# flag, and re-execs itself — no background subprocesses or TTY tricks needed.
 cc_cmd_slash_restart() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
@@ -1944,28 +1945,13 @@ cc_cmd_slash_restart() {
         printf '\e[31mNo tmux session detected — cannot restart.\e[0m\n'
         return 1
     fi
-    local script_path
-    script_path=$(command -v abr 2>/dev/null || echo "$0")
-    # Get the TTY of the attached tmux client. abr will exec tmux attach on it,
-    # which requires a real terminal — /dev/null silently breaks that.
-    local client_tty
-    client_tty=$(tmux list-clients -F '#{client_tty}' 2>/dev/null | head -1)
-    if [[ -z "$client_tty" || ! -c "$client_tty" ]]; then
-        printf '\e[31mCould not determine client TTY — cannot restart.\e[0m\n'
-        return 1
-    fi
-    local repo_root="$REPO_ROOT"
-    printf '\e[90m(Scheduling restart — session closing in 2 s…)\e[0m\n'
-    printf '%s|0|INFO|C&C: scheduling restart from %s in %s\n' "$ts" "$script_path" "$repo_root" >> "$log"
-    # Spawn a subprocess attached to the real client TTY with TMUX unset so
-    # launch_tmux takes the "exec tmux attach" path (not the "already in tmux" path).
-    TMUX="" nohup bash -c "sleep 2; cd '$repo_root' && exec '$script_path'" \
-        <"$client_tty" >"$client_tty" 2>&1 &
-    disown
+    printf '\e[90m(Restarting — session will close and relaunch…)\e[0m\n'
+    printf '%s|0|INFO|C&C: restart requested, killing session %s\n' "$ts" "$session" >> "$log"
+    # Signal the outer abr process to relaunch after tmux attach returns.
+    touch "${WORKTREE_BASE}/.abr-ipc/restart-needed"
     # Clean up log dir then kill the session (mirrors cc_cmd_shutdown).
     local log_dir="/tmp/abr-${session}"
     [[ -d "$log_dir" ]] && rm -rf "$log_dir"
-    printf '%s|0|INFO|C&C: restarting — killing tmux session %s\n' "$ts" "$session" >> "$log"
     tmux kill-session -t "$session"
 }
 
@@ -2987,7 +2973,12 @@ launch_tmux() {
         log "Added $total_workers pane(s) to existing session '$TMUX_SESSION'."
         log "  Attach:  tmux attach -t $TMUX_SESSION"
         if [[ -z "${TMUX:-}" ]]; then
-            exec tmux attach -t "$TMUX_SESSION"
+            tmux attach -t "$TMUX_SESSION" || true
+            # /restart writes this flag; re-exec abr to start a fresh session.
+            if [[ -f "${WORKTREE_BASE}/.abr-ipc/restart-needed" ]]; then
+                rm -f "${WORKTREE_BASE}/.abr-ipc/restart-needed"
+                exec "$(command -v abr 2>/dev/null || echo "$0")"
+            fi
         else
             log "(Already inside tmux — switch with: tmux switch -t $TMUX_SESSION)"
         fi
@@ -3059,7 +3050,12 @@ launch_tmux() {
     log ""
 
     if [[ -z "${TMUX:-}" ]]; then
-        exec tmux attach -t "$TMUX_SESSION"
+        tmux attach -t "$TMUX_SESSION" || true
+        # /restart writes this flag; re-exec abr to start a fresh session.
+        if [[ -f "${WORKTREE_BASE}/.abr-ipc/restart-needed" ]]; then
+            rm -f "${WORKTREE_BASE}/.abr-ipc/restart-needed"
+            exec "$(command -v abr 2>/dev/null || echo "$0")"
+        fi
     else
         log "(Already inside tmux — switch with: tmux switch -t $TMUX_SESSION)"
     fi
