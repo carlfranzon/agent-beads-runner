@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.15"
+ABR_VERSION="0.3.16"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1970,9 +1970,9 @@ cc_cmd_slash_restart() {
 }
 
 # update
-# Runs `brew update && brew upgrade abr` to self-update the installed formula.
-# Output is routed to the orchestrator dashboard (event log) rather than the
-# C&C pane, which is too small to display brew's verbose output.
+# Runs `brew update && brew upgrade abr` in a background process so the C&C
+# pane stays clean. Output streams line-by-line to the orchestrator dashboard.
+# A gum spinner (or plain wait) occupies C&C until done; one result line follows.
 cc_cmd_slash_update() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
@@ -1986,31 +1986,47 @@ cc_cmd_slash_update() {
         printf '\e[33mabr is not installed via Homebrew — cannot self-update.\e[0m\n'
         return 1
     fi
-    local tmp; tmp=$(mktemp)
-    local ok=true
-    printf '\e[90m(Running brew update — output in dashboard above…)\e[0m\n'
-    printf '%s|0|INFO|C&C: running brew update\n' "$ts" >> "$log"
-    brew update >"$tmp" 2>&1 || ok=false
-    while IFS= read -r line; do
-        printf '%s|0|INFO|%s\n' "$(date +%H:%M:%S)" "$line"
-    done < "$tmp" >> "$log"
-    if [[ "$ok" == "true" ]]; then
-        printf '\e[90m(Running brew upgrade abr — output in dashboard above…)\e[0m\n'
-        printf '%s|0|INFO|C&C: running brew upgrade abr\n' "$(date +%H:%M:%S)" >> "$log"
-        brew upgrade abr >"$tmp" 2>&1 || ok=false
+
+    local tmp_log; tmp_log=$(mktemp)
+    printf '%s|0|INFO|══ /update: brew update && brew upgrade abr ══\n' "$ts" >> "$log"
+
+    # Run brew in a background subshell; output goes to a temp file.
+    ( brew update >> "$tmp_log" 2>&1 && brew upgrade abr >> "$tmp_log" 2>&1 ) &
+    local brew_pid=$!
+
+    # Simultaneously forward the temp file to the orchestrator dashboard.
+    tail -n +1 -f "$tmp_log" 2>/dev/null | \
         while IFS= read -r line; do
-            printf '%s|0|INFO|%s\n' "$(date +%H:%M:%S)" "$line"
-        done < "$tmp" >> "$log"
+            printf '%s|0|INFO|  %s\n' "$(date +%H:%M:%S)" "$line"
+        done >> "$log" &
+    local tail_pid=$!
+
+    # Occupy C&C with a spinner while brew runs; fall back to a plain message.
+    if command -v gum &>/dev/null; then
+        gum spin --spinner dot --title "Updating abr…" -- \
+            bash -c "while kill -0 $brew_pid 2>/dev/null; do sleep 0.1; done"
+    else
+        printf '\e[90mUpdating… (see dashboard)\e[0m\n'
     fi
-    rm -f "$tmp"
-    if [[ "$ok" == "true" ]]; then
+
+    # Collect brew exit code (still our child even though gum polled for it).
+    local rc=0
+    wait "$brew_pid" || rc=$?
+
+    # Let tail flush any remaining lines then stop it.
+    sleep 0.3
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+    rm -f "$tmp_log"
+
+    if [[ $rc -eq 0 ]]; then
         local new_ver
         new_ver=$(brew list --versions abr 2>/dev/null | awk '{print $2}' || echo "unknown")
-        printf '%s|0|INFO|C&C: abr updated to %s\n' "$(date +%H:%M:%S)" "$new_ver" >> "$log"
-        printf '\e[32mDone — abr updated to %s. Restart to use the new version.\e[0m\n' "$new_ver"
+        printf '%s|0|INFO|══ Updated to %s — /restart to apply ══\n' "$(date +%H:%M:%S)" "$new_ver" >> "$log"
+        printf '\e[32mUpdated to %s — /restart to apply.\e[0m\n' "$new_ver"
     else
-        printf '%s|0|INFO|C&C: brew upgrade abr failed — see dashboard for details\n' "$(date +%H:%M:%S)" >> "$log"
-        printf '\e[31mbrew upgrade abr failed — see dashboard for details.\e[0m\n'
+        printf '%s|0|INFO|══ brew upgrade abr failed ══\n' "$(date +%H:%M:%S)" >> "$log"
+        printf '\e[31mUpdate failed — see dashboard for details.\e[0m\n'
         return 1
     fi
 }
