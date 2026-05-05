@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.14"
+ABR_VERSION="0.3.15"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1934,7 +1934,7 @@ cc_cmd_help() {
 
 # restart
 # Kills the current tmux session and relaunches abr in a fresh session.
-# Schedules the relaunch via a detached nohup process so it survives the kill.
+# Uses the attached client's TTY so exec tmux attach has a real terminal.
 cc_cmd_slash_restart() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
@@ -1946,13 +1946,21 @@ cc_cmd_slash_restart() {
     fi
     local script_path
     script_path=$(command -v abr 2>/dev/null || echo "$0")
+    # Get the TTY of the attached tmux client. abr will exec tmux attach on it,
+    # which requires a real terminal — /dev/null silently breaks that.
+    local client_tty
+    client_tty=$(tmux list-clients -F '#{client_tty}' 2>/dev/null | head -1)
+    if [[ -z "$client_tty" || ! -c "$client_tty" ]]; then
+        printf '\e[31mCould not determine client TTY — cannot restart.\e[0m\n'
+        return 1
+    fi
+    local repo_root="$REPO_ROOT"
     printf '\e[90m(Scheduling restart — session closing in 2 s…)\e[0m\n'
-    printf '%s|0|INFO|C&C: scheduling restart from %s in %s\n' "$ts" "$script_path" "$REPO_ROOT" >> "$log"
-    # Launch a detached process outside tmux that waits for the session to
-    # die, then relaunches abr (orchestrator/default mode) in the same repo.
-    ABR_RESTART_DIR="$REPO_ROOT" ABR_RESTART_BIN="$script_path" \
-        nohup bash -c 'sleep 2; cd "$ABR_RESTART_DIR"; exec "$ABR_RESTART_BIN"' \
-        </dev/null >/dev/null 2>&1 &
+    printf '%s|0|INFO|C&C: scheduling restart from %s in %s\n' "$ts" "$script_path" "$repo_root" >> "$log"
+    # Spawn a subprocess attached to the real client TTY with TMUX unset so
+    # launch_tmux takes the "exec tmux attach" path (not the "already in tmux" path).
+    TMUX="" nohup bash -c "sleep 2; cd '$repo_root' && exec '$script_path'" \
+        <"$client_tty" >"$client_tty" 2>&1 &
     disown
     # Clean up log dir then kill the session (mirrors cc_cmd_shutdown).
     local log_dir="/tmp/abr-${session}"
@@ -1963,7 +1971,8 @@ cc_cmd_slash_restart() {
 
 # update
 # Runs `brew update && brew upgrade abr` to self-update the installed formula.
-# Warns clearly if abr is not installed via Homebrew.
+# Output is routed to the orchestrator dashboard (event log) rather than the
+# C&C pane, which is too small to display brew's verbose output.
 cc_cmd_slash_update() {
     local log="$1"
     local ts; ts=$(date +%H:%M:%S)
@@ -1977,16 +1986,31 @@ cc_cmd_slash_update() {
         printf '\e[33mabr is not installed via Homebrew — cannot self-update.\e[0m\n'
         return 1
     fi
-    printf '\e[90m(Running brew update && brew upgrade abr — may take a moment…)\e[0m\n'
-    printf '%s|0|INFO|C&C: running brew update && brew upgrade abr\n' "$ts" >> "$log"
-    if brew update && brew upgrade abr; then
+    local tmp; tmp=$(mktemp)
+    local ok=true
+    printf '\e[90m(Running brew update — output in dashboard above…)\e[0m\n'
+    printf '%s|0|INFO|C&C: running brew update\n' "$ts" >> "$log"
+    brew update >"$tmp" 2>&1 || ok=false
+    while IFS= read -r line; do
+        printf '%s|0|INFO|%s\n' "$(date +%H:%M:%S)" "$line"
+    done < "$tmp" >> "$log"
+    if [[ "$ok" == "true" ]]; then
+        printf '\e[90m(Running brew upgrade abr — output in dashboard above…)\e[0m\n'
+        printf '%s|0|INFO|C&C: running brew upgrade abr\n' "$(date +%H:%M:%S)" >> "$log"
+        brew upgrade abr >"$tmp" 2>&1 || ok=false
+        while IFS= read -r line; do
+            printf '%s|0|INFO|%s\n' "$(date +%H:%M:%S)" "$line"
+        done < "$tmp" >> "$log"
+    fi
+    rm -f "$tmp"
+    if [[ "$ok" == "true" ]]; then
         local new_ver
         new_ver=$(brew list --versions abr 2>/dev/null | awk '{print $2}' || echo "unknown")
-        printf '%s|0|INFO|C&C: abr updated to %s\n' "$ts" "$new_ver" >> "$log"
-        printf '\e[32mabr updated to %s. Restart abr to use the new version.\e[0m\n' "$new_ver"
+        printf '%s|0|INFO|C&C: abr updated to %s\n' "$(date +%H:%M:%S)" "$new_ver" >> "$log"
+        printf '\e[32mDone — abr updated to %s. Restart to use the new version.\e[0m\n' "$new_ver"
     else
-        printf '%s|0|INFO|C&C: brew upgrade abr failed\n' "$ts" >> "$log"
-        printf '\e[31mbrew upgrade abr failed — check output above.\e[0m\n'
+        printf '%s|0|INFO|C&C: brew upgrade abr failed — see dashboard for details\n' "$(date +%H:%M:%S)" >> "$log"
+        printf '\e[31mbrew upgrade abr failed — see dashboard for details.\e[0m\n'
         return 1
     fi
 }
