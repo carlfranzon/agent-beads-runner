@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.18"
+ABR_VERSION="0.3.19"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -2680,12 +2680,20 @@ run_one_bead() {
             pr_title=$(bd_locked show "$bead_id" --json 2>/dev/null \
                 | python3 -c "import sys,json; print(json.load(sys.stdin).get('title','Work on $bead_id'))" 2>/dev/null \
                 || echo "Work on $bead_id")
-            local pr_out pr_exit
-            pr_out=$(cd "$wt_path" && gh pr create \
-                --title "feat($bead_id): $pr_title" \
-                --body "Automated PR for bead \`$bead_id\`. Created by abr." \
-                --base main 2>&1)
-            pr_exit=$?
+            local pr_out pr_exit pr_attempt
+            for pr_attempt in 1 2 3; do
+                [[ $pr_attempt -gt 1 ]] && { log "Retrying PR creation (attempt $pr_attempt/3)..."; sleep 10; }
+                pr_exit=0
+                pr_out=$(cd "$wt_path" && gh pr create \
+                    --title "feat($bead_id): $pr_title" \
+                    --body "Automated PR for bead \`$bead_id\`. Created by abr." \
+                    --base main 2>&1) || pr_exit=$?
+                # Success or "already exists" are not transient — stop retrying immediately
+                if [[ $pr_exit -eq 0 ]] || echo "$pr_out" | grep -qi "already exists"; then
+                    break
+                fi
+                [[ $pr_attempt -lt 3 ]] && while IFS= read -r line; do log "  [attempt $pr_attempt failed] $line"; done <<< "$pr_out"
+            done
             while IFS= read -r line; do log "  $line"; done <<< "$pr_out"
             if [[ $pr_exit -eq 0 ]]; then
                 log "PR created."
