@@ -18,7 +18,7 @@ set -euo pipefail
 #   abr --loop --parallel-3              # 3 tmux panes, each loops until no beads left
 #   abr --review                         # Review all open agent PRs
 #   abr --review --pr 5                  # Review a specific PR
-#   abr --review --parallel-3            # Review PRs in 3 parallel tmux panes
+#   abr --review --parallel-3            # 3 review workers drain all open agent PRs
 #   abr --prune-local-branches           # Delete merged local agent/* branches
 #   abr --prune-remote-branches          # Delete merged remote agent/* branches
 #   abr --no-tui --bead <id>             # Work a specific bead (without orchestrator)
@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.22"
+ABR_VERSION="0.3.23"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -157,7 +157,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Review all open agent PRs | `abr --review` |
 | Review a specific PR | `abr --review --pr 5` |
-| Review PRs in parallel | `abr --review --parallel-3` |
+| Parallel review queue drain | `abr --review --parallel-3` |
 | Delete merged local branches | `abr --prune-local-branches` |
 | Delete merged remote branches | `abr --prune-remote-branches` |
 | Use a different agent | `abr --agent claude` |
@@ -390,6 +390,7 @@ REVIEW_MODE=false
 ORCHESTRATOR_MODE=false
 NO_TUI=false
 DRY_RUN=false
+REVIEW_WORKER_LOOP=false  # Internal: queue-consuming review worker (no tmux spawning)
 NEW_TMUX=false
 PRUNE_LOCAL_BRANCHES=false
 PRUNE_REMOTE_BRANCHES=false
@@ -419,6 +420,7 @@ while [[ $# -gt 0 ]]; do
             fi
             shift ;;
         --review)       REVIEW_MODE=true; shift ;;
+        --review-worker-loop) REVIEW_WORKER_LOOP=true; shift ;;
         --no-tui)       NO_TUI=true; shift ;;
         --orchestrator) ORCHESTRATOR_MODE=true; PARALLEL=4; NEW_TMUX=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
@@ -466,7 +468,7 @@ Usage:
   abr --bead <id>                        Work a specific bead
   abr --review                           Review all open agent PRs
   abr --review --pr 5                    Review a specific PR
-  abr --review --parallel-3              Review PRs in 3 parallel tmux panes
+    abr --review --parallel-3              3 review workers drain all open agent PRs
   abr --no-tui                           Skip orchestrator TUI, run one bead then exit
   abr --orchestrator                     Launch orchestrator + 4 idle worker panes (explicit)
   abr --prune-local-branches             Delete merged local agent/* branches
@@ -499,7 +501,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /beads              Show bead status board grouped by status
     abr> /bead               Select one bead, then choose an action
     abr> /prune              Prune merged branches (local, remote, or both)
-    abr> /review             Choose review mode: oldest PR only, or all open PRs
+    abr> /review             Choose scope; for all-open, choose parallel review agents
     abr> /relayout           Resize panes to match current terminal window size
     abr> /update             Run brew update && brew upgrade abr to self-update
     abr> /restart            Exit and relaunch abr in a fresh tmux session
@@ -1133,6 +1135,93 @@ ipc_is_claimed() { [[ -f "${WORKTREE_BASE}/.abr-ipc/claimed/$1" ]]; }
 
 ipc_clear_claim() { rm -f "${WORKTREE_BASE}/.abr-ipc/claimed/$1"; }
 
+ipc_review_claim_dir() { echo "${WORKTREE_BASE}/.abr-ipc/review-claimed"; }
+ipc_review_done_dir() { echo "${WORKTREE_BASE}/.abr-ipc/review-done"; }
+
+ipc_review_reset_state() {
+    local claim_dir done_dir
+    claim_dir="$(ipc_review_claim_dir)"
+    done_dir="$(ipc_review_done_dir)"
+    rm -rf "$claim_dir" "$done_dir"
+    mkdir -p "$claim_dir" "$done_dir"
+}
+
+ipc_review_is_done() {
+    local pr_number="$1"
+    [[ -f "$(ipc_review_done_dir)/pr-${pr_number}" ]]
+}
+
+ipc_review_mark_done() {
+    local pr_number="$1"
+    local done_dir
+    done_dir="$(ipc_review_done_dir)"
+    mkdir -p "$done_dir"
+    printf '%s\n' "$$" > "${done_dir}/pr-${pr_number}"
+}
+
+ipc_review_clear_claim() {
+    local pr_number="$1"
+    rm -rf "$(ipc_review_claim_dir)/pr-${pr_number}"
+}
+
+ipc_review_try_claim() {
+    local pr_number="$1"
+    local claim_dir claim_path owner_pid
+    claim_dir="$(ipc_review_claim_dir)"
+    claim_path="${claim_dir}/pr-${pr_number}"
+    mkdir -p "$claim_dir"
+
+    # Atomic claim path creation: only one worker can create this directory.
+    if mkdir "$claim_path" 2>/dev/null; then
+        printf '%s\n' "$$" > "${claim_path}/pid"
+        return 0
+    fi
+
+    # Reclaim stale lock if owner process is gone.
+    owner_pid=""
+    [[ -f "${claim_path}/pid" ]] && owner_pid=$(cat "${claim_path}/pid" 2>/dev/null || echo "")
+    if [[ -n "$owner_pid" ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        rm -rf "$claim_path" 2>/dev/null || true
+        if mkdir "$claim_path" 2>/dev/null; then
+            printf '%s\n' "$$" > "${claim_path}/pid"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+pick_next_review_pr() {
+    local pr_list agent_pr_nums
+    pr_list=$(gh pr list --state open --json number,headRefName --limit 100 2>/dev/null) || {
+        logr "Failed to list PRs while picking next review item."
+        echo ""
+        return 0
+    }
+
+    # Keep only agent/* PRs, oldest first.
+    agent_pr_nums=$(echo "$pr_list" | python3 -c "
+import sys, json
+prs = json.load(sys.stdin)
+agent_prs = sorted([p for p in prs if p.get('headRefName','').startswith('agent/')], key=lambda p: p['number'])
+for p in agent_prs:
+    print(p['number'])
+" 2>/dev/null || echo "")
+
+    local pr_number
+    while read -r pr_number; do
+        [[ -z "$pr_number" ]] && continue
+        ipc_review_is_done "$pr_number" && continue
+        if ipc_review_try_claim "$pr_number"; then
+            echo "$pr_number"
+            return 0
+        fi
+    done <<< "$agent_pr_nums"
+
+    echo ""
+    return 0
+}
+
 ipc_signal_pushed() {
     mkdir -p "${WORKTREE_BASE}/.abr-ipc"
     touch "${WORKTREE_BASE}/.abr-ipc/last_push"
@@ -1340,7 +1429,7 @@ run_cc() {
                 "/beads   Show kanban-style bead board" \
                 "/bead    Pick bead then action menu" \
                 "/prune     Prune merged local/remote branches" \
-                "/review    Choose oldest PR only or all open PRs" \
+                "/review    Choose scope; all-open prompts for review agent count" \
                 "/relayout  Refresh pane layout to current window size" \
                 "/update    Self-update abr via brew update && brew upgrade" \
                 "/restart   Exit and relaunch abr in a fresh tmux session" \
@@ -1374,7 +1463,7 @@ run_cc() {
             beads)    cc_cmd_slash_beads "$log" || cmd_rc=$? ;;
             bead)     cc_cmd_slash_bead "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
             prune)    cc_cmd_slash_prune "$log" || cmd_rc=$? ;;
-            review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" || cmd_rc=$? ;;
+            review)   cc_cmd_slash_review "$ipc_dir" "$log" "$num_workers" "$_nw_file" || cmd_rc=$? ;;
             relayout) cc_cmd_slash_relayout "$log" "$num_workers" "$ipc_dir" || cmd_rc=$? ;;
             update)   cc_cmd_slash_update "$log" || cmd_rc=$? ;;
             restart)  cc_cmd_slash_restart "$log" || cmd_rc=$?; return 0 ;;
@@ -1504,17 +1593,13 @@ cc_cmd_slash_go() {
     cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
 }
 
-# /review — start a single review agent with scope selection:
-# next PR (oldest open) or all open PRs (oldest → newest)
+# /review — interactive review launch:
+# next PR (single reviewer) or all open PRs (prompt agent count, queue-drain workers)
 cc_cmd_slash_review() {
-    local ipc_dir="$1" log="$2" num_workers="$3"
+    local ipc_dir="$1" log="$2" num_workers="$3" _nw_file="$4"
     local target
     local review_mode review_scope
     local -a run_args
-    target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
-        printf '\e[31mNo free worker panes available right now.\e[0m\n'
-        return 1
-    }
 
     review_mode=$(prompt_choose "Review scope" "next PR" "all open PRs") || {
         printf '\e[31mReview launch cancelled.\e[0m\n'
@@ -1529,13 +1614,96 @@ cc_cmd_slash_review() {
             ;;
     esac
 
-    # Tell the orchestrator to expect exactly 1 EXIT event for this review session
-    echo "1" > "${ipc_dir}/num_workers"
-    run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review --review-scope "$review_scope")
-    [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+    if [[ "$review_scope" == "next" ]]; then
+        target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
+            printf '\e[31mNo free worker panes available right now.\e[0m\n'
+            return 1
+        }
 
-    printf '%s|0|INFO|C&C: /review scope=%s requested\n' "$(date +%H:%M:%S)" "$review_scope" >> "$log"
-    cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+        # Tell the orchestrator to expect exactly 1 EXIT event for this review session
+        echo "1" > "$_nw_file"
+        run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review --review-scope "next")
+        [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+
+        printf '%s|0|INFO|C&C: /review scope=next requested\n' "$(date +%H:%M:%S)" >> "$log"
+        cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+        return 0
+    fi
+
+    local review_agents
+    review_agents=$(select_count_quick_custom "Review all open PRs: how many agents?") || {
+        printf '\e[31mInvalid review agent count.\e[0m\n'
+        return 1
+    }
+
+    if ! prompt_confirm "Launch ${review_agents} review agent(s) with ${AGENT_TOOL}/${MODEL:-auto}?"; then
+        printf '\e[90mReview launch cancelled.\e[0m\n'
+        return 0
+    fi
+
+    # Count actually-registered panes (num_workers may have been reduced by /go or /review next).
+    local registered_panes=0
+    local max_registered_idx=0
+    for (( _rp=1; _rp<=64; _rp++ )); do
+        if [[ -f "${ipc_dir}/pane-A${_rp}" ]]; then
+            (( registered_panes++ ))
+            max_registered_idx="${_rp}"
+        fi
+    done
+    [[ "$registered_panes" -gt "$num_workers" ]] && num_workers="$registered_panes"
+
+    local -a idle_targets=()
+    while IFS= read -r _idle; do
+        [[ -n "$_idle" ]] && idle_targets+=("$_idle")
+    done < <(cc_list_idle_targets "$ipc_dir" "$num_workers")
+
+    if [[ "${#idle_targets[@]}" -lt "$review_agents" ]]; then
+        local needed=$(( review_agents - ${#idle_targets[@]} ))
+        printf '\e[33mNeed %d more free worker pane(s). Spawning…\e[0m\n' "$needed"
+        local n start_idx
+        start_idx=$(( max_registered_idx + 1 ))
+        for (( n=start_idx; n<start_idx+needed; n++ )); do
+            if _cc_spawn_idle_pane "$ipc_dir" "$n"; then
+                printf '\e[32mSpawned pane A%d\e[0m\n' "$n"
+                (( num_workers++ ))
+            else
+                printf '\e[31mFailed to spawn pane A%d\e[0m\n' "$n"
+            fi
+        done
+    fi
+
+    idle_targets=()
+    while IFS= read -r _idle; do
+        [[ -n "$_idle" ]] && idle_targets+=("$_idle")
+    done < <(cc_list_idle_targets "$ipc_dir" "$num_workers")
+
+    if [[ "${#idle_targets[@]}" -lt "$review_agents" ]]; then
+        printf '\e[33mOnly %d free pane(s) available; launching %d review agent(s) without interrupting busy panes.\e[0m\n' "${#idle_targets[@]}" "${#idle_targets[@]}"
+        review_agents="${#idle_targets[@]}"
+    fi
+    if [[ "$review_agents" -le 0 ]]; then
+        printf '\e[31mNo free panes available right now. Wait for a running session to finish, then try /review again.\e[0m\n'
+        return 1
+    fi
+
+    local -a launch_targets=("${idle_targets[@]:0:${review_agents}}")
+
+    # Keep orchestrator pane count in sync, then set expected EXIT events for this session.
+    echo "$num_workers" > "$_nw_file"
+    echo "$review_agents" > "$_nw_file"
+
+    # Start a fresh review queue for this /review all-open session.
+    ipc_review_reset_state
+
+    local i
+    for (( i=1; i<=review_agents; i++ )); do
+        target="${launch_targets[$((i-1))]}"
+        run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review --review-scope "all" --review-worker-loop)
+        [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+        cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
+    done
+
+    printf '%s|0|INFO|C&C: /review scope=all agents=%s requested\n' "$(date +%H:%M:%S)" "$review_agents" >> "$log"
 }
 
 cc_cmd_slash_agent() {
@@ -2005,7 +2173,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /beads               Show kanban-style bead board\n' "$ts"
         printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
         printf '%s|0|INFO|  /prune               Prune merged local/remote branches\n' "$ts"
-        printf '%s|0|INFO|  /review              Pick review scope: next PR or all open PRs\n' "$ts"
+        printf '%s|0|INFO|  /review              Pick scope; for all-open, choose parallel review agents\n' "$ts"
         printf '%s|0|INFO|  /relayout            Refresh pane layout to match current window size\n' "$ts"
         printf '%s|0|INFO|  /update              Self-update abr via brew update && brew upgrade abr\n' "$ts"
         printf '%s|0|INFO|  /restart             Exit and relaunch abr in a fresh tmux session\n' "$ts"
@@ -3652,6 +3820,17 @@ for i, issue in enumerate(data.get('issues', []), 1):
 
     case "$verdict" in
         approve)
+            local current_state
+            current_state=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            if [[ "$current_state" != "OPEN" ]]; then
+                log "PR #${pr_number} is no longer OPEN ($current_state) before merge step — skipping merge actions."
+                [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "NO_VERDICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                ipc_event "INFO" "PR #${pr_number} skipped at merge step (state=$current_state)" "$bead_id"
+                rm -f "$verdict_file"
+                trap - EXIT
+                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
+                return 0
+            fi
             log "Merging PR #${pr_number}..."
             local pr_title_text merge_output merge_rc
             pr_title_text=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])" 2>/dev/null || echo "$bead_id")
@@ -3814,6 +3993,17 @@ for i, issue in enumerate(data.get('issues', []), 1):
             ;;
 
         reject)
+            local current_state_reject
+            current_state_reject=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            if [[ "$current_state_reject" != "OPEN" ]]; then
+                log "PR #${pr_number} is no longer OPEN ($current_state_reject) before reject step — skipping close actions."
+                [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "NO_VERDICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                ipc_event "INFO" "PR #${pr_number} skipped at reject step (state=$current_state_reject)" "$bead_id"
+                rm -f "$verdict_file"
+                trap - EXIT
+                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
+                return 0
+            fi
             log "Rejecting PR #${pr_number}..."
             [[ -n "$issues" ]] && log "Issues found:" && while read -r line; do log "  $line"; done <<< "$issues"
 
@@ -3870,6 +4060,17 @@ for i, issue in enumerate(data.get('issues', []), 1):
             ;;
 
         *)
+            local current_state_unknown
+            current_state_unknown=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            if [[ "$current_state_unknown" != "OPEN" ]]; then
+                log "PR #${pr_number} is no longer OPEN ($current_state_unknown) before unreadable-verdict handling — skipping close actions."
+                [[ -n "$REVIEW_SUMMARY_FILE" ]] && echo "NO_VERDICT|${pr_number}|${bead_id}|${pr_title}|" >> "$REVIEW_SUMMARY_FILE"
+                ipc_event "INFO" "PR #${pr_number} skipped at unreadable-verdict step (state=$current_state_unknown)" "$bead_id"
+                rm -f "$verdict_file"
+                trap - EXIT
+                cleanup_worktree "$wt_path" "$branch" "$pr_local_ref" "$agent_pr_ref"
+                return 0
+            fi
             logr "Unknown or unreadable verdict '$verdict' for PR #${pr_number}."
             logr "Treating as rejection — closing PR and reopening bead for rework."
 
@@ -3939,6 +4140,34 @@ run_review() {
         printf '%s review_start scope=%s target_pr=%s parallel=%s\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${REVIEW_SCOPE}" "${TARGET_PR:-}" "${PARALLEL}" \
             >> "$review_trace_file"
+    fi
+
+    # Internal mode used by parallel review panes: keep claiming from the shared
+    # PR queue until no open unclaimed PR remains.
+    if [[ "$REVIEW_WORKER_LOOP" == "true" ]]; then
+        local n_reviewed=0
+        local pr_num
+        ipc_event "INFO" "Review worker loop start"
+        [[ -n "$review_trace_file" ]] && printf '%s worker_loop_start\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$review_trace_file"
+
+        while true; do
+            pr_num=$(pick_next_review_pr)
+            [[ -z "$pr_num" ]] && break
+
+            ipc_event "INFO" "Review worker claimed PR #$pr_num"
+            [[ -n "$review_trace_file" ]] && printf '%s worker_claim pr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr_num" >> "$review_trace_file"
+            review_one_pr "$pr_num" || true
+            (( n_reviewed++ )) || true
+
+            # Mark as completed for this review session so no sibling worker re-picks it.
+            ipc_review_mark_done "$pr_num"
+            ipc_review_clear_claim "$pr_num"
+            sleep 1
+        done
+
+        ipc_event "EXIT" "Review worker done (${n_reviewed} PR(s) reviewed)"
+        [[ -n "$review_trace_file" ]] && printf '%s worker_loop_done reviewed=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n_reviewed" >> "$review_trace_file"
+        return 0
     fi
 
     if [[ -n "$TARGET_PR" ]]; then
@@ -4019,8 +4248,8 @@ for p in agent_prs:
         return 0
     fi
 
-    # Parallel review via tmux
-    if [[ "$PARALLEL" -gt 0 ]]; then
+    # Parallel review via tmux (all-open scope only)
+    if [[ "$PARALLEL" -gt 0 && "$REVIEW_SCOPE" == "all" ]]; then
         if ! command -v tmux &>/dev/null; then
             logr "tmux is required for --parallel. Install with: brew install tmux"
             exit 1
@@ -4031,9 +4260,12 @@ for p in agent_prs:
 
         local total=${#pr_nums[@]}
         [[ $total -gt $PARALLEL ]] && total=$PARALLEL
-        ipc_event "INFO" "Parallel review launch: panes=$total queue_count=${#pr_nums[@]}"
+        ipc_event "INFO" "Parallel review launch: panes=$total queue_count=${#pr_nums[@]} (queue-drain mode)"
         [[ -n "$review_trace_file" ]] && printf '%s parallel_launch panes=%s queue_count=%s\n' \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$total" "${#pr_nums[@]}" >> "$review_trace_file"
+
+        # New review queue session: clear prior claim/done markers.
+        ipc_review_reset_state
 
         local session_exists=false
         tmux has-session -t "$TMUX_SESSION" 2>/dev/null && session_exists=true
@@ -4045,7 +4277,7 @@ for p in agent_prs:
         local ABR_LOG_DIR="/tmp/abr-${TMUX_SESSION}"
         local pane_cmds=()
         for (( i=0; i<total; i++ )); do
-            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --pr '${pr_nums[$i]}' $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
+            pane_cmds+=("export ABR_AGENT_IDX=$((i+1)); printf '%s' \"\$TMUX_PANE\" > '${WORKTREE_BASE}/.abr-ipc/pane-A$((i+1))'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${ABR_LOG_DIR}/agent-A$((i+1)).log'\"; sleep $((i * 3)) && cd '$REPO_ROOT' && '$script_path' --review --review-scope all --review-worker-loop $review_agent_flags; echo ''; echo '=== Review pane finished. Press Enter to close ==='; read")
         done
 
         if [[ "$session_exists" == "true" ]]; then
