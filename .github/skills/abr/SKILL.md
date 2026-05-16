@@ -35,7 +35,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` — OPEN, IN PROGRESS, CLOSED, READY, BLOCKED sections |
 | Bead action menu (slash) | `/bead` |
 | Prune merged branches (slash) | `/prune` |
-| Review open agent PRs (slash) | `/review` (choose next PR, or all open PRs then choose agent count) |
+| Review open agent PRs (slash) | `/review` (choose next PR, or all open PRs then choose agent count). Review agent reads PR comments and suggestions, implements minor ones, creates beads for substantial ones, and documents reasoning for ignored suggestions. |
 | Self-update via Homebrew (slash) | `/update` |
 | Restart abr (slash) | `/restart` |
 | Slash help | `/help` |

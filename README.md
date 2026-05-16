@@ -96,6 +96,13 @@ abr --agent copilot --model opus46-h
 # Review all open agent PRs
 abr --review
 
+# PR review comment handling
+When reviewing a PR, the agent will:
+- Parse all PR comments and suggestions
+- If a suggestion is minor and valid, implement it, commit, and push
+- If a suggestion is substantial but valid, create a new bead for it (referencing the PR and comment)
+- If not valid, explain why in the review summary
+
 # Review only the oldest open agent PR
 abr --review --review-scope next
 
