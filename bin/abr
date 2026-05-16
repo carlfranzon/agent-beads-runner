@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.21"
+ABR_VERSION="0.3.22"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -3933,13 +3933,24 @@ run_review() {
 
     log "=== Review mode ==="
 
+    local review_trace_file=""
+    if [[ -n "${ABR_LOG_DIR:-}" && -d "${ABR_LOG_DIR}" ]]; then
+        review_trace_file="${ABR_LOG_DIR}/review-session.log"
+        printf '%s review_start scope=%s target_pr=%s parallel=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${REVIEW_SCOPE}" "${TARGET_PR:-}" "${PARALLEL}" \
+            >> "$review_trace_file"
+    fi
+
     if [[ -n "$TARGET_PR" ]]; then
         # Review a specific PR
+        ipc_event "INFO" "Review session start: target PR #$TARGET_PR"
+        [[ -n "$review_trace_file" ]] && printf '%s queue target_pr=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TARGET_PR" >> "$review_trace_file"
         REVIEW_SUMMARY_FILE=$(mktemp)
         review_one_pr "$TARGET_PR"
         print_review_summary "$REVIEW_SUMMARY_FILE"
         _ipc_emit_review_summary "$REVIEW_SUMMARY_FILE"
         ipc_event "EXIT" "Review of PR #$TARGET_PR complete"
+        [[ -n "$review_trace_file" ]] && printf '%s review_done reviewed=1\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$review_trace_file"
         rm -f "$REVIEW_SUMMARY_FILE"
         REVIEW_SUMMARY_FILE=""
         return
@@ -3982,13 +3993,29 @@ for p in agent_prs:
         log "Review scope: all open PRs — reviewing oldest to newest."
     fi
 
-    count=$(echo "$agent_prs" | wc -l | tr -d ' ')
+    local -a pr_nums=()
+    while read -r pr_line; do
+        local pn
+        pn=$(echo "$pr_line" | awk '{print $1}')
+        [[ -n "$pn" ]] && pr_nums+=("$pn")
+    done <<< "$agent_prs"
+
+    count=${#pr_nums[@]}
     log "Review queue ($count PR):"
     echo "$agent_prs" | while read -r line; do log "  $line"; done
+    ipc_event "INFO" "Review session queue: scope=$REVIEW_SCOPE count=$count"
+    if [[ "$count" -gt 0 ]]; then
+        local pr_csv
+        pr_csv=$(IFS=,; echo "${pr_nums[*]}")
+        ipc_event "INFO" "Review PR queue: $pr_csv"
+        [[ -n "$review_trace_file" ]] && printf '%s queue scope=%s count=%s prs=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REVIEW_SCOPE" "$count" "$pr_csv" >> "$review_trace_file"
+    fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY RUN] Would review each PR in the queue above with $AGENT_TOOL"
         [[ "$PARALLEL" -gt 0 ]] && log "[DRY RUN] Using $PARALLEL parallel tmux panes"
+        [[ -n "$review_trace_file" ]] && printf '%s dry_run queue_count=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$count" >> "$review_trace_file"
         return 0
     fi
 
@@ -4002,16 +4029,11 @@ for p in agent_prs:
         local script_path
         script_path="$(command -v abr 2>/dev/null || echo "$0")"
 
-        # Collect PR numbers into an array
-        local pr_nums=()
-        while read -r pr_line; do
-            local pn
-            pn=$(echo "$pr_line" | awk '{print $1}')
-            [[ -n "$pn" ]] && pr_nums+=("$pn")
-        done <<< "$agent_prs"
-
         local total=${#pr_nums[@]}
         [[ $total -gt $PARALLEL ]] && total=$PARALLEL
+        ipc_event "INFO" "Parallel review launch: panes=$total queue_count=${#pr_nums[@]}"
+        [[ -n "$review_trace_file" ]] && printf '%s parallel_launch panes=%s queue_count=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$total" "${#pr_nums[@]}" >> "$review_trace_file"
 
         local session_exists=false
         tmux has-session -t "$TMUX_SESSION" 2>/dev/null && session_exists=true
@@ -4093,17 +4115,23 @@ for p in agent_prs:
     # Review each PR sequentially
     REVIEW_SUMMARY_FILE=$(mktemp)
     local n_reviewed=0
-    while read -r pr_line; do
-        local pr_num
-        pr_num=$(echo "$pr_line" | awk '{print $1}')
+    local pr_num
+    for pr_num in "${pr_nums[@]}"; do
+        ipc_event "INFO" "Review session progress: starting PR #$pr_num ($((n_reviewed + 1))/$count)"
+        [[ -n "$review_trace_file" ]] && printf '%s review_start pr=%s idx=%s total=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr_num" "$((n_reviewed + 1))" "$count" >> "$review_trace_file"
         review_one_pr "$pr_num" || true
         (( n_reviewed++ )) || true
+        [[ -n "$review_trace_file" ]] && printf '%s review_done pr=%s reviewed=%s total=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pr_num" "$n_reviewed" "$count" >> "$review_trace_file"
         sleep 2  # Brief pause between reviews
-    done <<< "$agent_prs"
+    done
 
     print_review_summary "$REVIEW_SUMMARY_FILE"
     _ipc_emit_review_summary "$REVIEW_SUMMARY_FILE"
     ipc_event "EXIT" "Review session done (${n_reviewed}/${count} PR(s) reviewed)"
+    [[ -n "$review_trace_file" ]] && printf '%s review_complete reviewed=%s total=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n_reviewed" "$count" >> "$review_trace_file"
     rm -f "$REVIEW_SUMMARY_FILE"
     REVIEW_SUMMARY_FILE=""
 
@@ -4585,6 +4613,10 @@ main() {
 
     # Review mode — review open agent PRs
     if [[ "$REVIEW_MODE" == "true" ]]; then
+        # Set up log dir for structured trace in no-TUI review runs.
+        # In tmux/orchestrator flows ABR_LOG_DIR is already exported by launch_tmux.
+        ABR_LOG_DIR="${ABR_LOG_DIR:-/tmp/abr-${TMUX_SESSION}}"
+        mkdir -p "$ABR_LOG_DIR"
         run_review
         return
     fi
