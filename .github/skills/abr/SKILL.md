@@ -35,7 +35,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` — OPEN, IN PROGRESS, CLOSED, READY, BLOCKED sections |
 | Bead action menu (slash) | `/bead` |
 | Prune merged branches (slash) | `/prune` |
-| Review open agent PRs (slash) | `/review` |
+| Review open agent PRs (slash) | `/review` (choose next PR or all open PRs) |
 | Self-update via Homebrew (slash) | `/update` |
 | Restart abr (slash) | `/restart` |
 | Slash help | `/help` |
@@ -45,6 +45,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Hard-kill pane A3 (C&C) | `kill --target A3` |
 | Show pane status (C&C) | `status` |
 | Review all open agent PRs | `abr --review` |
+| Review only oldest open PR | `abr --review --review-scope next` |
 | Review a specific PR | `abr --review --pr 5` |
 | Review PRs in parallel | `abr --review --parallel-3` |
 | Delete merged local branches | `abr --prune-local-branches` |

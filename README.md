@@ -96,6 +96,9 @@ abr --agent copilot --model opus46-h
 # Review all open agent PRs
 abr --review
 
+# Review only the oldest open agent PR
+abr --review --review-scope next
+
 # Review a specific PR
 abr --review --pr 5
 
@@ -138,6 +141,7 @@ abr --set-default-model sonnet46-h
 | `--bead <id>` | Work on a specific bead |
 | `--review` | Review open agent-created PRs |
 | `--pr <number>` | With `--review`: review a specific PR |
+| `--review-scope <mode>` | With `--review`: `all` (default) or `next` (oldest open PR only) |
 | `--plan` | Interactive feature decomposition → beads |
 | `--prune-local-branches` | Delete merged local `agent/*` branches |
 | `--prune-remote-branches` | Delete merged remote `agent/*` branches and stale remote refs |
@@ -270,7 +274,7 @@ Typing `/` at the `abr>` prompt opens an interactive **gum filter** picker listi
 | `/beads` | Show kanban-style grouped bead board in dashboard (OPEN, IN PROGRESS, CLOSED, READY, BLOCKED sections). |
 | `/bead` | Select a bead and choose `send to an agent`, `show info`, or `close`. |
 | `/prune` | Interactively prune merged local, remote, or both branch sets. |
-| `/review` | Run a single review agent on open agent PRs (uses current agent/model defaults). |
+| `/review` | Launch one review agent and choose scope: `next PR` (oldest only) or `all open PRs` (oldest → newest). |
 | `/update` | Self-update abr via `brew update && brew upgrade abr`. |
 | `/restart` | Kill the current session and relaunch abr in a fresh tmux session. |
 | `/help` | Show slash command reference in dashboard. |

@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.19"
+ABR_VERSION="0.3.21"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -152,7 +152,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 | Show bead board (slash) | `/beads` |
 | Bead action menu (slash) | `/bead` |
 | Prune merged branches (slash) | `/prune` |
-| Review open agent PRs (slash) | `/review` |
+| Review open agent PRs (slash) | `/review` (choose next PR or all open PRs) |
 | Slash help | `/help` |
 | Shutdown orchestrator session (slash) | `/exit` or `/quit` |
 | Review all open agent PRs | `abr --review` |
@@ -396,6 +396,7 @@ PRUNE_REMOTE_BRANCHES=false
 PLAN_MODE=false
 TARGET_BEAD=""
 TARGET_PR=""      # PR number for --review --pr <N>
+REVIEW_SCOPE="all"  # For --review: "all" (default) or "next" (oldest open PR only)
 REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by run_review)
 INTERNAL_ORCHESTRATOR=""  # Non-empty = run_orchestrator mode; value = num_workers
 INTERNAL_CC=""           # Non-empty = run_cc (command & control) mode; value = num_workers
@@ -427,6 +428,13 @@ while [[ $# -gt 0 ]]; do
         --plan)         PLAN_MODE=true; NO_TUI=true; shift ;;
         --bead)         TARGET_BEAD="$2"; shift 2 ;;
         --pr)           TARGET_PR="$2"; shift 2 ;;
+        --review-scope)
+            REVIEW_SCOPE="$2"
+            if [[ "$REVIEW_SCOPE" != "all" && "$REVIEW_SCOPE" != "next" ]]; then
+                echo "Invalid --review-scope: $REVIEW_SCOPE (use: all|next)" >&2
+                exit 1
+            fi
+            shift 2 ;;
         --agent)        AGENT_TOOL="$2"; shift 2 ;;
         --install-skill) shift ;;  # already handled above
         --model)        MODEL="$2"; shift 2 ;;
@@ -491,7 +499,7 @@ Orchestrator dashboard & C&C prompt (parallel mode):
     abr> /beads              Show bead status board grouped by status
     abr> /bead               Select one bead, then choose an action
     abr> /prune              Prune merged branches (local, remote, or both)
-    abr> /review             Run a single review agent on open agent PRs
+    abr> /review             Choose review mode: oldest PR only, or all open PRs
     abr> /relayout           Resize panes to match current terminal window size
     abr> /update             Run brew update && brew upgrade abr to self-update
     abr> /restart            Exit and relaunch abr in a fresh tmux session
@@ -521,8 +529,9 @@ Options:
   --parallel-N          Run N agents in tmux panes (e.g. --parallel-5)
   --parallel            Shorthand for --parallel-3
   --bead <id>           Work on a specific bead instead of auto-picking
-  --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
-  --pr <number>         With --review: review a specific PR number
+    --review              Review open agent-created PRs (merge, reject, or file follow-up beads)
+    --pr <number>         With --review: review a specific PR number
+    --review-scope <mode> With --review: `all` (default) or `next` (oldest open PR only)
   --no-tui              Skip orchestrator TUI; run plain mode (one bead, or with --loop/--parallel)
   --orchestrator        Start a dedicated orchestrator tmux session with 4 idle worker panes (explicit)
   --prune-local-branches Delete merged local agent/* branches
@@ -1331,7 +1340,7 @@ run_cc() {
                 "/beads   Show kanban-style bead board" \
                 "/bead    Pick bead then action menu" \
                 "/prune     Prune merged local/remote branches" \
-                "/review    Run one review agent on open PRs" \
+                "/review    Choose oldest PR only or all open PRs" \
                 "/relayout  Refresh pane layout to current window size" \
                 "/update    Self-update abr via brew update && brew upgrade" \
                 "/restart   Exit and relaunch abr in a fresh tmux session" \
@@ -1429,16 +1438,55 @@ cc_cmd_slash_prune() {
     esac
 }
 
+# Returns 0 when target pane is currently busy running abr, 1 otherwise.
+cc_target_is_busy() {
+    local target="$1" ipc_dir="$2"
+    [[ "$target" =~ ^A[0-9]+$ ]] || return 1
+    local idx="${target#A}"
+    local state_file="${ipc_dir}/state-A${idx}"
+
+    if [[ -f "$state_file" ]]; then
+        local state
+        state=$(<"$state_file")
+        [[ "$state" == "busy" ]] && return 0
+    fi
+
+    local pane_file="${ipc_dir}/pane-${target}"
+    [[ -f "$pane_file" ]] || return 1
+    local pane_id
+    pane_id=$(<"$pane_file")
+    [[ -n "$pane_id" ]] || return 1
+
+    local session
+    session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+    [[ -n "$session" ]] || return 1
+
+    local pane_cmd
+    pane_cmd=$(tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | awk -v p="$pane_id" '$1==p{print $2; exit}')
+    [[ "$pane_cmd" == "abr" ]]
+}
+
+# Prints idle aliases (A1, A2, ...) one per line.
+cc_list_idle_targets() {
+    local ipc_dir="$1" num_workers="$2"
+    local i
+    for (( i=1; i<=num_workers; i++ )); do
+        local target="A${i}"
+        [[ -f "${ipc_dir}/pane-${target}" ]] || continue
+        if ! cc_target_is_busy "$target" "$ipc_dir"; then
+            echo "$target"
+        fi
+    done
+}
+
 cc_first_target_alias() {
     local ipc_dir="$1"
     local num_workers="$2"
-    for (( i=1; i<=num_workers; i++ )); do
-        if [[ -f "${ipc_dir}/pane-A${i}" ]]; then
-            echo "A${i}"
-            return 0
-        fi
-    done
-    return 1
+    local target
+    target=$(cc_list_idle_targets "$ipc_dir" "$num_workers" | head -n 1)
+    [[ -n "$target" ]] || return 1
+    echo "$target"
+    return 0
 }
 
 cc_cmd_slash_go() {
@@ -1446,7 +1494,7 @@ cc_cmd_slash_go() {
     local target
     local -a run_args
     target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
-        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        printf '\e[31mNo free worker panes available right now.\e[0m\n'
         return 1
     }
     # Tell the orchestrator to expect exactly 1 EXIT event for this single-agent session
@@ -1456,19 +1504,37 @@ cc_cmd_slash_go() {
     cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
 }
 
-# /review — start a single review agent on the next open agent PR
+# /review — start a single review agent with scope selection:
+# next PR (oldest open) or all open PRs (oldest → newest)
 cc_cmd_slash_review() {
     local ipc_dir="$1" log="$2" num_workers="$3"
     local target
+    local review_mode review_scope
     local -a run_args
     target=$(cc_first_target_alias "$ipc_dir" "$num_workers") || {
-        printf '\e[31mNo worker panes registered yet.\e[0m\n'
+        printf '\e[31mNo free worker panes available right now.\e[0m\n'
         return 1
     }
+
+    review_mode=$(prompt_choose "Review scope" "next PR" "all open PRs") || {
+        printf '\e[31mReview launch cancelled.\e[0m\n'
+        return 1
+    }
+    case "$review_mode" in
+        "next PR") review_scope="next" ;;
+        "all open PRs") review_scope="all" ;;
+        *)
+            printf '\e[31mUnknown review scope: %s\e[0m\n' "$review_mode"
+            return 1
+            ;;
+    esac
+
     # Tell the orchestrator to expect exactly 1 EXIT event for this review session
     echo "1" > "${ipc_dir}/num_workers"
-    run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review)
+    run_args=(--target "$target" --agent "$AGENT_TOOL" --single-run --review --review-scope "$review_scope")
     [[ -n "$MODEL" ]] && run_args+=(--model "$MODEL")
+
+    printf '%s|0|INFO|C&C: /review scope=%s requested\n' "$(date +%H:%M:%S)" "$review_scope" >> "$log"
     cc_cmd_run "$ipc_dir" "$log" "$num_workers" "${run_args[@]}"
 }
 
@@ -1656,7 +1722,7 @@ _cc_spawn_idle_pane() {
     local session
     session=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
     [[ -z "$session" ]] && return 1
-    local idle_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-A${idx}'; printf '\\033[90m[A${idx} idle] Use /go or /start from C&C to launch\\033[0m\\n'; read -r _"
+    local idle_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-A${idx}'; printf 'idle' > '${ipc_dir}/state-A${idx}'; printf '\\033[90m[A${idx} idle] Use /go or /start from C&C to launch\\033[0m\\n'; read -r _"
     tmux split-window -v -t "${session}" "$idle_cmd" 2>/dev/null || return 1
     tmux select-layout -t "${session}" tiled 2>/dev/null || true
     sleep 0.4   # brief wait for pane to register its TMUX_PANE
@@ -1670,9 +1736,12 @@ cc_cmd_slash_start() {
     # set to 1 by /review or /go for their EXIT-event tracking, even when all
     # original panes are still alive and registered).
     local registered_panes=0
-    for (( _rp=1; _rp<=32; _rp++ )); do
-        [[ -f "${ipc_dir}/pane-A${_rp}" ]] || break
-        (( registered_panes++ ))
+    local max_registered_idx=0
+    for (( _rp=1; _rp<=64; _rp++ )); do
+        if [[ -f "${ipc_dir}/pane-A${_rp}" ]]; then
+            (( registered_panes++ ))
+            max_registered_idx="${_rp}"
+        fi
     done
     [[ "$registered_panes" -gt "$num_workers" ]] && num_workers="$registered_panes"
     local work_target agent_count loop_count chosen_agent chosen_model
@@ -1698,23 +1767,42 @@ cc_cmd_slash_start() {
         return 0
     fi
 
-    # Expand worker panes if more are needed than currently available
-    if [[ "$agent_count" -gt "$num_workers" ]]; then
-        local needed=$(( agent_count - num_workers ))
-        printf '\e[33mNeed %d more worker pane(s). Spawning…\e[0m\n' "$needed"
-        local n
-        for (( n=num_workers+1; n<=agent_count; n++ )); do
+    local -a idle_targets
+    while IFS= read -r _idle; do
+        [[ -n "$_idle" ]] && idle_targets+=("$_idle")
+    done < <(cc_list_idle_targets "$ipc_dir" "$num_workers")
+
+    # Ensure enough free panes exist; never preempt busy panes.
+    if [[ "${#idle_targets[@]}" -lt "$agent_count" ]]; then
+        local needed=$(( agent_count - ${#idle_targets[@]} ))
+        printf '\e[33mNeed %d more free worker pane(s). Spawning…\e[0m\n' "$needed"
+        local n start_idx
+        start_idx=$(( max_registered_idx + 1 ))
+        for (( n=start_idx; n<start_idx+needed; n++ )); do
             if _cc_spawn_idle_pane "$ipc_dir" "$n"; then
                 printf '\e[32mSpawned pane A%d\e[0m\n' "$n"
+                (( num_workers++ ))
             else
-                printf '\e[31mFailed to spawn pane A%d — launching with %d agent(s)\e[0m\n' "$n" "$((n-1))"
-                agent_count=$((n - 1))
-                break
+                printf '\e[31mFailed to spawn pane A%d\e[0m\n' "$n"
             fi
         done
-        echo "$agent_count" > "$_nw_file"
-        num_workers="$agent_count"
     fi
+
+    idle_targets=()
+    while IFS= read -r _idle; do
+        [[ -n "$_idle" ]] && idle_targets+=("$_idle")
+    done < <(cc_list_idle_targets "$ipc_dir" "$num_workers")
+
+    if [[ "${#idle_targets[@]}" -lt "$agent_count" ]]; then
+        printf '\e[33mOnly %d free pane(s) available; launching %d agent(s) without interrupting busy panes.\e[0m\n' "${#idle_targets[@]}" "${#idle_targets[@]}"
+        agent_count="${#idle_targets[@]}"
+    fi
+    if [[ "$agent_count" -le 0 ]]; then
+        printf '\e[31mNo free panes available right now. Wait for a running session to finish, then try /start again.\e[0m\n'
+        return 1
+    fi
+
+    echo "$num_workers" > "$_nw_file"
 
     local specific_bead=""
     if [[ "$work_target" == "specific bead" ]]; then
@@ -1723,16 +1811,18 @@ cc_cmd_slash_start() {
             return 1
         }
         if [[ "$agent_count" -gt 1 ]]; then
-            printf '\e[33mSpecific bead with multiple agents: only pane A1 will receive the specific bead; others get next ready.\e[0m\n'
+            printf '\e[33mSpecific bead with multiple agents: only the first selected free pane receives the specific bead; others get next ready.\e[0m\n'
         fi
     fi
+
+    local -a launch_targets=("${idle_targets[@]:0:${agent_count}}")
 
     # Tell the orchestrator how many EXIT events to expect for this session
     echo "$agent_count" > "$_nw_file"
 
     local i
     for (( i=1; i<=agent_count; i++ )); do
-        local target="A${i}"
+        local target="${launch_targets[$((i-1))]}"
         local -a run_args=(--target "$target" --agent "$chosen_agent" --model "$chosen_model")
         if [[ -n "$specific_bead" ]] && [[ $i -eq 1 ]]; then
             run_args+=(--bead "$specific_bead" --single-run)
@@ -1813,6 +1903,10 @@ cc_cmd_run() {
     fi
     local pane_id
     pane_id=$(cc_resolve_target "$target" "$ipc_dir") || return 1
+    if cc_target_is_busy "$target" "$ipc_dir"; then
+        printf '\e[31mRefusing to launch in %s: pane is currently busy running a session.\e[0m\n' "$target"
+        return 1
+    fi
     local idx="${target#A}"
     local script_path
     script_path="$(command -v abr 2>/dev/null || echo "$0")"
@@ -1835,7 +1929,7 @@ cc_cmd_run() {
     local run_log_dir="/tmp/abr-$(tmux display-message -p '#{session_name}' 2>/dev/null || echo abr)"
 
     # $TMUX_PANE is evaluated by the shell in the new pane (deferred via \$)
-    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${run_log_dir}/agent-${target}.log'\"; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
+    local new_cmd="export ABR_AGENT_IDX=${idx}; printf '%s' \"\$TMUX_PANE\" > '${ipc_dir}/pane-${target}'; printf 'busy' > '${ipc_dir}/state-A${idx}'; tmux pipe-pane -t \"\$TMUX_PANE\" -o \"cat >> '${run_log_dir}/agent-${target}.log'\"; cd '${REPO_ROOT}' && '${script_path}' ${flags}; printf 'idle' > '${ipc_dir}/state-A${idx}'; printf '\n=== Pane finished. Press Enter to close ===\n'; read -r _"
     if tmux respawn-pane -k -t "$pane_id" "$new_cmd" 2>/dev/null; then
         printf '%s|0|INFO|C&C: respawned %s (%s)  →  abr %s\n' \
             "$(date +%H:%M:%S)" "$target" "$pane_id" "$flags" >> "$log"
@@ -1911,7 +2005,7 @@ cc_cmd_help() {
         printf '%s|0|INFO|  /beads               Show kanban-style bead board\n' "$ts"
         printf '%s|0|INFO|  /bead                Pick bead then action menu\n' "$ts"
         printf '%s|0|INFO|  /prune               Prune merged local/remote branches\n' "$ts"
-        printf '%s|0|INFO|  /review              Run one review agent on open agent PRs\n' "$ts"
+        printf '%s|0|INFO|  /review              Pick review scope: next PR or all open PRs\n' "$ts"
         printf '%s|0|INFO|  /relayout            Refresh pane layout to match current window size\n' "$ts"
         printf '%s|0|INFO|  /update              Self-update abr via brew update && brew upgrade abr\n' "$ts"
         printf '%s|0|INFO|  /restart             Exit and relaunch abr in a fresh tmux session\n' "$ts"
@@ -3874,13 +3968,26 @@ for p in agent_prs:
         return 0
     fi
 
-    local count
+    local total_open count
+    total_open=$(echo "$agent_prs" | wc -l | tr -d ' ')
+    if [[ "$REVIEW_SCOPE" == "next" ]]; then
+        local oldest_pr_line oldest_pr_num
+        oldest_pr_line=$(echo "$agent_prs" | head -n 1)
+        oldest_pr_num=$(echo "$oldest_pr_line" | awk '{print $1}')
+        log "Found $total_open open agent PR(s)."
+        log "Review scope: next PR — selecting oldest open PR #$oldest_pr_num only."
+        agent_prs="$oldest_pr_line"
+    else
+        log "Found $total_open open agent PR(s)."
+        log "Review scope: all open PRs — reviewing oldest to newest."
+    fi
+
     count=$(echo "$agent_prs" | wc -l | tr -d ' ')
-    log "Found $count open agent PR(s):"
+    log "Review queue ($count PR):"
     echo "$agent_prs" | while read -r line; do log "  $line"; done
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY RUN] Would review each PR above with $AGENT_TOOL"
+        log "[DRY RUN] Would review each PR in the queue above with $AGENT_TOOL"
         [[ "$PARALLEL" -gt 0 ]] && log "[DRY RUN] Using $PARALLEL parallel tmux panes"
         return 0
     fi
@@ -4448,6 +4555,10 @@ main() {
     # Warn if --pr was given without --review
     if [[ -n "$TARGET_PR" && "$REVIEW_MODE" == "false" ]]; then
         logr "--pr $TARGET_PR has no effect without --review. Did you mean: abr --review --pr $TARGET_PR?"
+        exit 1
+    fi
+    if [[ "$REVIEW_SCOPE" != "all" && "$REVIEW_MODE" == "false" ]]; then
+        logr "--review-scope $REVIEW_SCOPE has no effect without --review."
         exit 1
     fi
 
