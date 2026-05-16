@@ -27,7 +27,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.22"
+ABR_VERSION="0.3.23"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
