@@ -12,7 +12,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 - `abr` installed (`brew tap carlfranzon/tap && brew install abr`)
 - `bd` CLI installed and initialized in the repo (`bd init`)
-- At least one agent CLI installed: `copilot`, `claude`, `gemini`, or `codex`
+- At least one agent CLI installed: `copilot`, `claude`, `gemini`, `agy` (Antigravity), or `codex`
 - `git`, `python3`, `gh` (GitHub CLI) available
 - `tmux` required for `--parallel` mode
 - `gum` for interactive C&C selectors and slash workflows
@@ -62,13 +62,14 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 ## Agents
 
-Four agent backends are supported via `--agent`:
+Five agent backends are supported via `--agent`:
 
 | Agent | CLI | Default Model |
 |-------|-----|---------------|
 | `copilot` (default) | `copilot` | `claude-sonnet-4.6` (high effort) |
 | `claude` | `claude` | `claude-sonnet-4-6` |
 | `gemini` | `gemini` | `gemini-2.5-pro` |
+| `antigravity` | `agy` | `gemini-2.5-pro` |
 | `codex` | `codex` | `gpt-5.4` |
 
 ## Model Selection
@@ -97,7 +98,7 @@ Append `-l`, `-m`, `-h`, or `-xh` to any short name:
 | `-h` | high | `sonnet-46-h` |
 | `-xh` | extra-high | `gpt52-xh` |
 
-Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Codex. Claude and Gemini parse but ignore effort (no CLI flag).
+Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Codex. Claude, Gemini, and Antigravity parse but ignore effort (no CLI flag).
 
 ## Workflow of a Single Agent Run
 

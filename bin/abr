@@ -23,11 +23,12 @@ set -euo pipefail
 #   abr --prune-remote-branches          # Delete merged remote agent/* branches
 #   abr --no-tui --bead <id>             # Work a specific bead (without orchestrator)
 #   abr --agent gemini                   # Use Gemini CLI (default: copilot)
+#   abr --agent antigravity              # Use Antigravity CLI (agy)
 #   abr --agent copilot --model opus46-h # Use Copilot with Opus 4.6, high effort
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.24"
+ABR_VERSION="0.3.26"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -73,9 +74,10 @@ if [[ "${INSTALL_SKILL:-}" == "true" ]]; then
         echo "  1) GitHub Copilot   ~/.copilot/skills/abr/"
         echo "  2) Claude Code      ~/.claude/skills/abr/"
         echo "  3) Gemini           ~/.gemini/extensions/abr/"
-        echo "  4) Codex            ~/.codex/skills/abr/"
-        echo "  5) Generic agents   ~/.agents/skills/abr/"
-        echo "  6) All of the above"
+        echo "  4) Antigravity      ~/.gemini/antigravity-cli/plugins/abr/"
+        echo "  5) Codex            ~/.codex/skills/abr/"
+        echo "  6) Generic agents   ~/.agents/skills/abr/"
+        echo "  7) All of the above"
         echo ""
         printf "Enter choices (comma-separated, e.g. 1,2,3): "
         read -r choices
@@ -93,11 +95,12 @@ if [[ "${INSTALL_SKILL:-}" == "true" ]]; then
                 1) platforms+=("GitHub Copilot");  dirs+=("$HOME/.copilot/skills/abr") ;;
                 2) platforms+=("Claude Code");     dirs+=("$HOME/.claude/skills/abr") ;;
                 3) platforms+=("Gemini");          dirs+=("$HOME/.gemini/extensions/abr") ;;
-                4) platforms+=("Codex");           dirs+=("$HOME/.codex/skills/abr") ;;
-                5) platforms+=("Generic agents");  dirs+=("$HOME/.agents/skills/abr") ;;
-                6)
-                    platforms=("GitHub Copilot" "Claude Code" "Gemini" "Codex" "Generic agents")
-                    dirs=("$HOME/.copilot/skills/abr" "$HOME/.claude/skills/abr" "$HOME/.gemini/extensions/abr" "$HOME/.codex/skills/abr" "$HOME/.agents/skills/abr")
+                4) platforms+=("Antigravity");     dirs+=("$HOME/.gemini/antigravity-cli/plugins/abr") ;;
+                5) platforms+=("Codex");           dirs+=("$HOME/.codex/skills/abr") ;;
+                6) platforms+=("Generic agents");  dirs+=("$HOME/.agents/skills/abr") ;;
+                7)
+                    platforms=("GitHub Copilot" "Claude Code" "Gemini" "Antigravity" "Codex" "Generic agents")
+                    dirs=("$HOME/.copilot/skills/abr" "$HOME/.claude/skills/abr" "$HOME/.gemini/extensions/abr" "$HOME/.gemini/antigravity-cli/plugins/abr" "$HOME/.codex/skills/abr" "$HOME/.agents/skills/abr")
                     break
                     ;;
                 *) echo "Unknown choice: $pick (skipping)" ;;
@@ -129,7 +132,7 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 - `abr` installed (`brew tap carlfranzon/tap && brew install abr`)
 - `bd` CLI installed and initialized in the repo (`bd init`)
-- At least one agent CLI installed: `copilot`, `claude`, `gemini`, or `codex`
+- At least one agent CLI installed: `copilot`, `claude`, `gemini`, `agy` (Antigravity), or `codex`
 - `git`, `python3`, `gh` (GitHub CLI) available
 - `tmux` required for `--parallel` mode
 - `gum` for interactive C&C selectors and slash workflows
@@ -169,13 +172,14 @@ argument-hint: 'Describe what you want to do, e.g. "launch 3 agents on ready bea
 
 ## Agents
 
-Four agent backends are supported via `--agent`:
+Five agent backends are supported via `--agent`:
 
 | Agent | CLI | Default Model |
 |-------|-----|---------------|
 | `copilot` (default) | `copilot` | `claude-sonnet-4.6` (high effort) |
 | `claude` | `claude` | `claude-sonnet-4-6` |
 | `gemini` | `gemini` | `gemini-2.5-pro` |
+| `antigravity` | `agy` | `gemini-2.5-pro` |
 | `codex` | `codex` | `gpt-5.4` |
 
 ## Model Selection
@@ -204,7 +208,7 @@ Append `-l`, `-m`, `-h`, or `-xh` to any short name:
 | `-h` | high | `sonnet-46-h` |
 | `-xh` | extra-high | `gpt52-xh` |
 
-Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Codex. Claude and Gemini parse but ignore effort (no CLI flag).
+Effort is passed via `--effort` for Copilot, `-c model_reasoning_effort` for Codex. Claude, Gemini, and Antigravity parse but ignore effort (no CLI flag).
 
 ## Workflow of a Single Agent Run
 
@@ -402,7 +406,7 @@ REVIEW_SUMMARY_FILE=""  # Temp file for accumulating review run summary (set by 
 INTERNAL_ORCHESTRATOR=""  # Non-empty = run_orchestrator mode; value = num_workers
 INTERNAL_CC=""           # Non-empty = run_cc (command & control) mode; value = num_workers
 INTERNAL_BEADS_BOARD="" # Non-empty = write beads board to log then exit; value = log path
-AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | codex
+AGENT_TOOL="${AGENT_TOOL:-${_cfg_agent:-copilot}}"  # copilot | claude | gemini | antigravity | codex
 MODEL="${_cfg_model:-}"  # Model short name (e.g. sonnet46-h); empty = agent default
 TMUX_SESSION="${TMUX_SESSION:-${_cfg_tmux_session:-abr-${REPO_NAME}}}"
 GUM_AVAILABLE=false
@@ -474,6 +478,7 @@ Usage:
   abr --prune-local-branches             Delete merged local agent/* branches
   abr --prune-remote-branches            Delete merged remote agent/* branches
   abr --agent gemini                     Use Gemini CLI
+  abr --agent antigravity                Use Antigravity CLI (agy)
   abr --agent copilot --model opus46-h   Use Copilot with Opus 4.6, high effort
   abr --install-skill                    Install abr skill for AI agents
   abr --set-default-agent gemini         Interactively configure the default agent
@@ -538,7 +543,7 @@ Options:
   --orchestrator        Start a dedicated orchestrator tmux session with 4 idle worker panes (explicit)
   --prune-local-branches Delete merged local agent/* branches
   --prune-remote-branches Delete merged remote agent/* branches and stale remote refs
-  --agent <tool>        AI tool: copilot (default), claude, gemini, codex
+  --agent <tool>        AI tool: copilot (default), claude, gemini, antigravity, codex
   --model <name>        Model short name (see table below). Default: per-agent
   --new-tmux            Create a separate tmux session (default: add panes to existing)
   --install-skill       Install abr skill to AI agent platforms (interactive)
@@ -574,7 +579,7 @@ Config files:
     model = sonnet46-h
 
   Supported keys:
-    agent          Default agent backend (copilot, claude, gemini, codex)
+    agent          Default agent backend (copilot, claude, gemini, antigravity, codex)
     model          Default model short name (e.g. sonnet46-h)
     copilot_cli    Path to Copilot CLI binary
     tmux_session   tmux session name
@@ -1709,7 +1714,7 @@ cc_cmd_slash_review() {
 cc_cmd_slash_agent() {
     local log="$1"
     local selected
-    selected=$(prompt_choose "Select default agent" "copilot" "claude" "gemini" "codex") || {
+    selected=$(prompt_choose "Select default agent" "copilot" "claude" "gemini" "antigravity" "codex") || {
         printf '\e[31mAgent selection cancelled.\e[0m\n'
         return 1
     }
@@ -1724,7 +1729,7 @@ get_model_list_for_agent() {
     case "$1" in
         copilot) echo "sonnet46-h sonnet45-h opus46-h gpt54 gpt54m gpt53c gem25p haiku gpt52 gpt41" ;;
         claude)  echo "sonnet46 sonnet45 opus46 opus45 haiku sonnet4" ;;
-        gemini)  echo "25-pro 25-flash 31-pro 3-flash 2-flash" ;;
+        gemini|antigravity)  echo "25-pro 25-flash 31-pro 3-flash 2-flash" ;;
         codex)   echo "gpt54 gpt54m gpt53c gpt52 gpt41 o4m o3m" ;;
         *)       echo "sonnet46-h gpt54 gem25p" ;;
     esac
@@ -1923,7 +1928,7 @@ cc_cmd_slash_start() {
         printf '\e[31mInvalid loop count.\e[0m\n'
         return 1
     }
-    chosen_agent=$(prompt_choose "Step 4: choose agent (current: ${AGENT_TOOL})" "copilot" "claude" "gemini" "codex") || return 1
+    chosen_agent=$(prompt_choose "Step 4: choose agent (current: ${AGENT_TOOL})" "copilot" "claude" "gemini" "antigravity" "codex") || return 1
 
     # Step 5: show only models relevant to chosen agent
     local -a model_opts
@@ -2532,7 +2537,7 @@ resolve_model_and_effort() {
                 haiku)                  MODEL_RESOLVED="claude-haiku-4-5" ;;
                 *)                      MODEL_RESOLVED="$base" ;;
             esac ;;
-        gemini)
+        gemini|antigravity)
             case "$base" in
                 25-pro)                 MODEL_RESOLVED="gemini-2.5-pro" ;;
                 25-flash)               MODEL_RESOLVED="gemini-2.5-flash" ;;
@@ -2893,6 +2898,11 @@ run_one_bead() {
             local gm_args=(--prompt "$prompt" --approval-mode=yolo)
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
             (cd "$wt_path" && gemini "${gm_args[@]}") ;;
+        antigravity)
+            local agy_args=(--dangerously-skip-permissions --print "$prompt")
+            local agy_env=()
+            [[ -n "$MODEL_RESOLVED" ]] && agy_env+=(AGY_MODEL="$MODEL_RESOLVED")
+            (cd "$wt_path" && env "${agy_env[@]}" agy "${agy_args[@]}") ;;
         codex)
             local cx_args=(exec --full-auto)
             [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
@@ -2901,7 +2911,7 @@ run_one_bead() {
             (cd "$wt_path" && codex "${cx_args[@]}")
             ;;
         *)
-            logr "Unknown agent tool: $AGENT_TOOL (valid: copilot, claude, gemini, codex)"
+            logr "Unknown agent tool: $AGENT_TOOL (valid: copilot, claude, gemini, antigravity, codex)"
             return 1
             ;;
     esac
@@ -3767,6 +3777,12 @@ for f in files:
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
             (cd "$wt_path" && gemini "${gm_args[@]}") || true
             ;;
+        antigravity)
+            local agy_args=(--dangerously-skip-permissions --print "$prompt")
+            local agy_env=()
+            [[ -n "$MODEL_RESOLVED" ]] && agy_env+=(AGY_MODEL="$MODEL_RESOLVED")
+            (cd "$wt_path" && env "${agy_env[@]}" agy "${agy_args[@]}") || true
+            ;;
         codex)
             local cx_args=(exec --full-auto)
             [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
@@ -3925,6 +3941,12 @@ for i, issue in enumerate(data.get('issues', []), 1):
                                 local gm_args=(--prompt "$conflict_prompt" --approval-mode=yolo)
                                 [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
                                 (cd "$wt_path" && gemini "${gm_args[@]}") || true
+                                ;;
+                            antigravity)
+                                local agy_args=(--dangerously-skip-permissions --print "$conflict_prompt")
+                                local agy_env=()
+                                [[ -n "$MODEL_RESOLVED" ]] && agy_env+=(AGY_MODEL="$MODEL_RESOLVED")
+                                (cd "$wt_path" && env "${agy_env[@]}" agy "${agy_args[@]}") || true
                                 ;;
                             codex)
                                 local cx_args=(exec --full-auto)
@@ -4649,6 +4671,12 @@ run_plan_mode() {
             [[ -n "$MODEL_RESOLVED" ]] && gm_args+=(--model "$MODEL_RESOLVED")
             (cd "$REPO_ROOT" && gemini "${gm_args[@]}")
             ;;
+        antigravity)
+            local agy_args=(--sandbox -i "$plan_prompt")
+            local agy_env=()
+            [[ -n "$MODEL_RESOLVED" ]] && agy_env+=(AGY_MODEL="$MODEL_RESOLVED")
+            (cd "$REPO_ROOT" && env "${agy_env[@]}" agy "${agy_args[@]}")
+            ;;
         codex)
             local cx_args=(-a on-request)
             [[ -n "$MODEL_RESOLVED" ]] && cx_args+=(--model "$MODEL_RESOLVED")
@@ -4716,6 +4744,7 @@ run_plan_mode() {
                     copilot) (cd "$REPO_ROOT" && "$COPILOT_CLI" -i "$revise_prompt" --model "${MODEL_RESOLVED:-claude-sonnet-4.6}" --effort "${EFFORT_RESOLVED:-high}" --mode plan --allow-all) ;;
                     claude)  local ra=("$revise_prompt" --permission-mode plan); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); (cd "$REPO_ROOT" && claude "${ra[@]}") ;;
                     gemini)  local ra=(-i "$revise_prompt" --approval-mode plan); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); (cd "$REPO_ROOT" && gemini "${ra[@]}") ;;
+                    antigravity) local ra=(--sandbox -i "$revise_prompt"); local agy_env=(); [[ -n "$MODEL_RESOLVED" ]] && agy_env+=(AGY_MODEL="$MODEL_RESOLVED"); (cd "$REPO_ROOT" && env "${agy_env[@]}" agy "${ra[@]}") ;;
                     codex)   local ra=(-a on-request); [[ -n "$MODEL_RESOLVED" ]] && ra+=(--model "$MODEL_RESOLVED"); ra+=("$revise_prompt"); (cd "$REPO_ROOT" && codex "${ra[@]}") ;;
                 esac
 
@@ -4836,6 +4865,7 @@ main() {
     case "$AGENT_TOOL" in
         claude) command -v claude &>/dev/null || { logr "Claude CLI not found."; exit 1; } ;;
         gemini) command -v gemini &>/dev/null || { logr "Gemini CLI not found."; exit 1; } ;;
+        antigravity) command -v agy &>/dev/null || { logr "Antigravity CLI (agy) not found. Install: https://antigravity.google/download"; exit 1; } ;;
         codex)  command -v codex &>/dev/null || { logr "Codex CLI not found. Install: npm i -g @openai/codex"; exit 1; } ;;
     esac
 

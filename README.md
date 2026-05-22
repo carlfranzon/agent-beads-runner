@@ -6,7 +6,7 @@ Run `abr` from any beads-enabled git repo to automatically pick a bead, create a
 
 ## Features
 
-- **Multi-agent support** — Copilot CLI, Claude Code, Gemini CLI, Codex CLI
+- **Multi-agent support** — Copilot CLI, Claude Code, Gemini CLI, Antigravity CLI, Codex CLI
 - **Parallel execution** — Run N agents simultaneously in tmux panes
 - **Orchestrator dashboard** — Live colour-coded event feed in the center tmux pane
 - **C&C prompt** — Interactive `abr>` command prompt to respawn, stop, or kill individual agent panes on the fly
@@ -49,6 +49,7 @@ chmod +x /usr/local/bin/abr
   - [Copilot CLI](https://docs.github.com/en/copilot) (default)
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+  - [Antigravity CLI](https://antigravity.google/download) (`agy`)
   - [Codex CLI](https://github.com/openai/codex)
 - **[gh](https://cli.github.com/)** — GitHub CLI (for PR creation/review)
 - **[tmux](https://github.com/tmux/tmux)** — (for `--parallel` mode)
@@ -86,6 +87,9 @@ abr --agent claude
 
 # Use Gemini CLI
 abr --agent gemini
+
+# Use Antigravity CLI (successor to Gemini CLI)
+abr --agent antigravity
 
 # Use Codex CLI
 abr --agent codex
@@ -153,7 +157,7 @@ abr --set-default-model sonnet46-h
 | `--plan` | Interactive feature decomposition → beads |
 | `--prune-local-branches` | Delete merged local `agent/*` branches |
 | `--prune-remote-branches` | Delete merged remote `agent/*` branches and stale remote refs |
-| `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `codex` |
+| `--agent <tool>` | AI tool: `copilot` (default), `claude`, `gemini`, `antigravity`, `codex` |
 | `--model <name>` | Model short name (see below) |
 | `--new-tmux` | Create a separate tmux session |
 | `--install-skill` | Install abr skill to AI agent platforms (interactive) |
