@@ -28,7 +28,7 @@ set -euo pipefail
 #   abr --dry-run                        # Show what would happen
 #
 
-ABR_VERSION="0.3.26"
+ABR_VERSION="0.3.27"
 
 # --- Early-exit commands (no git repo required) -------------------------------
 
@@ -1729,7 +1729,7 @@ get_model_list_for_agent() {
     case "$1" in
         copilot) echo "sonnet46-h sonnet45-h opus46-h gpt54 gpt54m gpt53c gem25p haiku gpt52 gpt41" ;;
         claude)  echo "sonnet46 sonnet45 opus46 opus45 haiku sonnet4" ;;
-        gemini|antigravity)  echo "25-pro 25-flash 31-pro 3-flash 2-flash" ;;
+        gemini|antigravity)  echo "25-pro 25-flash 35-flash 31-pro 3-flash 2-flash" ;;
         codex)   echo "gpt54 gpt54m gpt53c gpt52 gpt41 o4m o3m" ;;
         *)       echo "sonnet46-h gpt54 gem25p" ;;
     esac
@@ -2520,6 +2520,7 @@ resolve_model_and_effort() {
                 # Gemini
                 gem25p|gem-25p)         MODEL_RESOLVED="gemini-2.5-pro" ;;
                 gem3f|gem-3f)           MODEL_RESOLVED="gemini-3-flash-preview" ;;
+                gem35f|gem-35f)         MODEL_RESOLVED="gemini-3.5-flash" ;;
                 gem31p|gem-31p)         MODEL_RESOLVED="gemini-3.1-pro-preview" ;;
                 # Other
                 grok)                   MODEL_RESOLVED="grok-code-fast-1" ;;
@@ -2543,6 +2544,7 @@ resolve_model_and_effort() {
                 25-flash)               MODEL_RESOLVED="gemini-2.5-flash" ;;
                 2-flash)                MODEL_RESOLVED="gemini-2.0-flash" ;;
                 3-flash|gem3f|gem-3f)   MODEL_RESOLVED="gemini-3-flash-preview" ;;
+                35-flash|gem35f|gem-35f) MODEL_RESOLVED="gemini-3.5-flash" ;;
                 31-pro|gem31p|gem-31p)  MODEL_RESOLVED="gemini-3.1-pro-preview" ;;
                 25-pro-p|gem25p|gem-25p) MODEL_RESOLVED="gemini-2.5-pro" ;;
                 *)                      MODEL_RESOLVED="$base" ;;
